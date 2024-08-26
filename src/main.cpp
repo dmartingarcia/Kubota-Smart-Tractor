@@ -1,5 +1,14 @@
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include "secrets.h"
+#include <WiFiUdp.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
+#include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 
 // Hot to calibrate:
 // Start with these values, COmpile and Upload the code :rocket:
@@ -16,14 +25,11 @@
 #define CALIBRATION_IN_VOLTAGE 15.25
 #define CALIBRATION_A0_VOLTAGE 2.90
 #define INPUT_VOLTAGE A0
-#define VOLTAGE_THRESHOLD 14.70
+#define VOLTAGE_THRESHOLD 14.80
 #define LED_PIN D4
 #define RELAY_PIN D1
 #define RELAY_ACTIVATION_DELAY 500
-#define C_SDA D7
-#define C_SCL D6
-#define C_VIN D5
-#define C_GND D0
+#define ALTERNATOR_ACTIVE_STATE false
 
 float calculate_battery_voltage();
 void check_relay(float voltage);
@@ -31,18 +37,35 @@ void check_relay(float voltage);
 unsigned int next_relay_check = 0;
 bool relay_state = HIGH;
 bool led_state = HIGH;
-
+bool connected = true;
 void setup() {
   Serial.begin(9600);
 
   pinMode(RELAY_PIN, OUTPUT);
-  pinMode(C_GND, OUTPUT);
-  pinMode(C_VIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
 
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  int retry_connect_countdown = 10;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println(retry_connect_countdown);
+    if(retry_connect_countdown-- == 0){
+      connected = false;
+      break;
+    }
+  }
 
-  digitalWrite(C_GND, LOW);
-  digitalWrite(C_VIN, HIGH);
+  if(connected){
+    ArduinoOTA.setHostname("smarttractor");
+    ArduinoOTA.begin();
+
+    // Print local IP address and start web server
+    Serial.println("WiFi connected.");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+  }
 }
 
 void toggle_led(){
@@ -56,6 +79,10 @@ void toggle_led(){
 }
 
 void loop() {
+  if(connected){
+    ArduinoOTA.handle();
+  }
+
   toggle_led();
   float battery_voltage = calculate_battery_voltage();
   Serial.print("Voltage: ");
@@ -90,11 +117,11 @@ void check_relay(float voltage){
 
   if(over_voltage){
     Serial.println("Over");
-    relay_state = LOW;
+    relay_state = !ALTERNATOR_ACTIVE_STATE;
     next_relay_check = millis() + RELAY_ACTIVATION_DELAY;
   }else{
     Serial.println("Under");
-    relay_state = HIGH;
+    relay_state = ALTERNATOR_ACTIVE_STATE;
   }
 
   digitalWrite(RELAY_PIN, relay_state);
