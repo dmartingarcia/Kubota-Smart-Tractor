@@ -7,10 +7,12 @@
 extern ESP8266WebServer server;
 
 struct DataPoint {
-  unsigned long timestamp;
-  float voltage;
-  bool relayState;
-  bool engineRunning;
+    unsigned long timestamp;
+    float voltage;
+    bool outputActive;
+    uint16_t pwmValue;
+    bool outputMode; // true for PWM, false for Relay
+    bool engineRunning;
 };
 
 extern DataPoint history[];
