@@ -38,6 +38,7 @@ unsigned long next_relay_check = 0;
 static unsigned long lastPidUpdate = 0;
 static unsigned long last_led_toggle = 0;
 static bool led_state = HIGH;
+float current_voltage = 0.0;
 
 void connectToWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -84,8 +85,9 @@ float read_voltage() {
   float total = 0;
 
   // Collect samples
-  samples[index] = analogRead(INPUT_VOLTAGE);
-  index = (index + 1) % SAMPLES;
+  for (int i = 0; i < SAMPLES; i++) {
+    samples[i] = analogRead(INPUT_VOLTAGE);
+  }
 
   // Calculate moving average
   for (int i = 0; i < SAMPLES; i++) total += samples[i];
@@ -96,12 +98,11 @@ float read_voltage() {
 }
 
 void manage_alternator() {
-  float current_voltage = read_voltage();
-
   if(USE_PWM) {
     // PID-based control
     if(millis() - lastPidUpdate >= PID_SAMPLE_TIME) {
       pidInput = current_voltage;
+
       chargePID.Compute();
       lastPidUpdate = millis();
 
@@ -138,7 +139,17 @@ void store_data() {
     alternator.isActive(),
     alternator.getPWM(),  // Store PWM value
   };
+
   historyIndex = (historyIndex + 1) % 120;
+
+  Serial.printf("Current Voltage: %.2fV\n", current_voltage);
+  Serial.printf("Alternator State: %s\n", alternator.isActive() ? "ON" : "OFF");
+  Serial.printf("PWM Value: %d\n", alternator.getPWM());
+  Serial.printf("Relay State: %s\n", last_state ? "ON" : "OFF");
+  Serial.printf("Next Relay Check: %lu\n", next_relay_check);
+  Serial.printf("History Index: %d\n", historyIndex);
+  Serial.printf("Connected: %s\n", connected ? "Yes" : "No");
+  Serial.println();
 }
 
 // Modified toggle_led to reflect PWM status
@@ -167,6 +178,9 @@ void toggle_led() {
         digitalWrite(LED_PIN, alternator.isActive() ? LOW : HIGH);
         break;
       case 2: // Fast blink (2Hz) PWM active
+        analogWrite(LED_PIN, alternator.getPWM());
+      case 0: // Slow blink (1Hz) Alternator inactive
+      case 3: // Double flash (0.5Hz) WiFi connection failed
         digitalWrite(LED_PIN, led_state);
         led_state = !led_state;
         break;
@@ -180,7 +194,7 @@ unsigned long lastWifiConnection = 0;
 
 void loop() {
   unsigned long currentMillis = millis();
-
+  float current_voltage = read_voltage();
 
   if (WiFi.status() != WL_CONNECTED) {
     connected = false;
@@ -190,6 +204,7 @@ void loop() {
       lastWifiConnection = currentMillis;
     }
   } else {
+    connected = true;
     ArduinoOTA.handle();
     server.handleClient();
   }
