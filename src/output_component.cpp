@@ -2,8 +2,7 @@
 
 #define OUTPUT_PIN              D1
 #define PWM_FREQUENCY           5000    // 5kHz for MOSFET
-#define PWM_RESOLUTION          10      // 10-bit resolution (0-1023)
-#define MAX_CHARGE_CURRENT_PWM  800     // Max safe PWM value (≈78% of 1023)
+#define PWM_RESOLUTION          1023      // 10-bit resolution (0-1023)
 #define USE_PWM                 true    // Set to false for relay control
 #include "output_component.h"
 #include <Arduino.h>
@@ -17,8 +16,8 @@ OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool active
 {
   pinMode(pin, OUTPUT);
   if(isPWM) {
-    analogWriteFreq(5000);  // 5kHz frequency
-    analogWriteRange(1023);  // 10-bit resolution
+    analogWriteFreq(PWM_FREQUENCY);  // 5kHz frequency
+    analogWriteRange(PWM_RESOLUTION);  // 10-bit resolution
   }
   off();
 }
