@@ -39,6 +39,7 @@ static unsigned long lastPidUpdate = 0;
 static unsigned long last_led_toggle = 0;
 static bool led_state = HIGH;
 float current_voltage = 0.0;
+bool engine_running = false; // TODO: determine engine state from the voltage increment when enabling alternator
 
 void connectToWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
