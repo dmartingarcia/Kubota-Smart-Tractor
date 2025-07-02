@@ -100,7 +100,7 @@ void handleRoot() {
       </div>
     </div>
 
-    <div class="status-box">
+    <div class="status-box" id="chartContainer" style="height: 1000px;">
       <h2 style="color: #495057;">Voltage History</h2>
       <canvas id="voltageChart"></canvas>
     </div>
@@ -138,8 +138,8 @@ void handleRoot() {
           plugins: {
             tooltip: {
               callbacks: {
-                title: (items) => new Date(items[0].raw.x).toLocaleTimeString(),
-                label: (item) => `${item.raw.y}V (${item.raw.mode})`
+                title: (items) => (items[0].raw.x / 1000) + 's',
+                label: (item) => `${item.raw.y}V`
               }
             }
           }
@@ -196,7 +196,7 @@ void handleRoot() {
       }
 
       // Update every 2 seconds
-      setInterval(fetchData, 2000);
+      setInterval(fetchData, 5000);
       fetchData();
     </script>
   </body>
