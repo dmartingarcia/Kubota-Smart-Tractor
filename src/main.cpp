@@ -8,6 +8,10 @@
 #include "output_component.h"
 #include <PID_v1.h>
 
+// Extern AP credentials from secrets.h
+extern const char* ap_ssid;
+extern const char* ap_password;
+
 // Configuration
 #define CALIBRATION_IN_VOLTAGE        15.25
 #define CALIBRATION_A0_VOLTAGE        2.90
@@ -36,23 +40,38 @@ bool connected = false;
 static bool last_state = false;
 unsigned long next_relay_check = 0;
 static unsigned long lastPidUpdate = 0;
-static unsigned long last_led_toggle = 0;
-static bool led_state = HIGH;
 float current_voltage = 0.0;
 bool engine_running = false; // TODO: determine engine state from the voltage increment when enabling alternator
 
-void connectToWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.print("\nConnecting to ");
-    Serial.println(ssid);
-    WiFi.begin(ssid, password);
-  } else {
+void setupWiFiAP() {
+  if (WiFi.getMode() == WIFI_AP) {
+    return; // AP is already set up
+  }
+
+  // Configure the ESP as an access point
+  WiFi.mode(WIFI_AP);
+
+  // Set static IP for AP
+  IPAddress local_IP(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(local_IP, gateway, subnet);
+
+  bool apStarted = WiFi.softAP(ap_ssid, ap_password);
+
+  if (apStarted) {
+    Serial.println("\nAccess Point Started");
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+
+    // Configure OTA
     ArduinoOTA.setHostname("smarttractor");
     ArduinoOTA.begin();
 
-    Serial.println("\nWiFi connected\nIP: " + WiFi.localIP().toString());
-
     setupWebServer();
+  } else {
+    Serial.println("\nFailed to start AP mode!");
   }
 }
 
@@ -72,17 +91,13 @@ void setup() {
     chargePID.SetOutputLimits(0, MAX_CHARGE_CURRENT_PWM);
   }
 
-  // WiFi connection
-  Serial.print("\nConnecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-
-  connectToWiFi();
+  // WiFi Access Point setup
+  Serial.println("\nSetting up WiFi Access Point...");
+  setupWiFiAP();
 }
 
 float read_voltage() {
   static int samples[SAMPLES];
-  static int index = 0;
   float total = 0;
 
   // Collect samples
@@ -102,11 +117,9 @@ void manage_alternator() {
   if(USE_PWM) {
     // PID-based control
     if(millis() - lastPidUpdate >= PID_SAMPLE_TIME) {
-      pidInput = current_voltage;
-
+      pidInput = current_voltage * 10;
       chargePID.Compute();
       lastPidUpdate = millis();
-
       // Safety limits
       if(current_voltage >= VOLTAGE_THRESHOLD_HIGH) {
         alternator.off();
@@ -197,11 +210,11 @@ void loop() {
   unsigned long currentMillis = millis();
   float current_voltage = read_voltage();
 
-  if (WiFi.status() != WL_CONNECTED) {
+  // Check AP status
+  if (WiFi.getMode() != WIFI_AP) {
     connected = false;
-    if(currentMillis - lastWifiConnection >= 20000){ // trying to connect every 20 seconds
-      alternator.off(); // Preventing overcharging while is connecting
-      connectToWiFi();
+    if(currentMillis - lastWifiConnection >= 60000) { // Try to setup AP every 60 seconds if needed
+      setupWiFiAP();
       lastWifiConnection = currentMillis;
     }
   } else {

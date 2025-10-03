@@ -7,7 +7,7 @@ ESP8266-based intelligent charging system with adaptive PID control and web moni
 ## Features ✨
 - 🎮 **Adaptive PID Control** - Maintains precise voltage regulation
 - ⚡ **Dual Output Modes** - Relay or PWM MOSFET control (configurable)
-- 📶 **WiFi Web Interface** - Real-time monitoring & historical charts
+- 📶 **WiFi Access Point & Web Interface** - Real-time monitoring & historical charts
 - 🔄 **OTA Updates** - Wireless firmware upgrades
 - 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status
 - 🔒 **Multi-layer Protection** - Over-voltage cutoff, rate limiting, and thermal safety
@@ -55,8 +55,8 @@ MOSFET Drain → GND (with heatsink)
 ### Configuration
 1. Create `include/secrets.h`:
    ```cpp
-   const char* ssid = "YOUR_SSID";
-   const char* password = "YOUR_PASSWORD";
+   const char* ap_ssid = "SmartTractor-AP";  // Access Point SSID
+   const char* ap_password = "TractorSecure";  // Access Point password (min 8 characters)
    ```
 2. Configure operation mode in `src/main.cpp`:
    ```cpp
@@ -90,7 +90,7 @@ MOSFET Drain → GND (with heatsink)
    ```
 
 ## Web Interface 🌐
-Access via `http://smarttractor.local` or device IP:
+Connect to the "SmartTractor-AP" WiFi network with password "TractorSecure", then access via `http://192.168.4.1`:
 
 
 **Features:**
@@ -109,10 +109,14 @@ Access via `http://smarttractor.local` or device IP:
 | Double Flash (0.5Hz)   | WiFi Connection Failed     |
 
 ## OTA Updates 🛠️
-1. Connect to device WiFi
+1. Connect to the "SmartTractor-AP" WiFi network with password "TractorSecure"
 2. In PlatformIO:
    ```bash
-   pio run --target upload --upload-port smarttractor.local
+   pio run --target upload --environment wemos_d1_mini_ota
+   ```
+   or
+   ```bash
+   pio run --target upload --upload-port 192.168.4.1
    ```
 3. Monitor serial output for progress
 

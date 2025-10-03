@@ -7,12 +7,17 @@ extern OutputComponent alternator;
 extern DataPoint history[];
 extern byte historyIndex;
 extern bool engine_running;
+bool web_initialized = false;
 
 void setupWebServer() {
-  server.on("/", handleRoot);
-  server.on("/data", handleData);
-  server.on("/history", handleHistory);
-  server.begin();
+  if (!web_initialized) {
+    server.on("/", handleRoot);
+    server.on("/data", handleData);
+    server.on("/history", handleHistory);
+    server.begin();
+    Serial.println("Web server started");
+    web_initialized = true;
+  }
 }
 
 void handleRoot() {
