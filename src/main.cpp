@@ -15,21 +15,21 @@ extern const char* ap_password;
 // Configuration
 #define CALIBRATION_IN_VOLTAGE        15.25
 #define CALIBRATION_A0_VOLTAGE        2.90
-#define VOLTAGE_THRESHOLD_HIGH        14.8
-#define VOLTAGE_THRESHOLD_LOW         14.0
+#define VOLTAGE_THRESHOLD_HIGH        14.6
+#define VOLTAGE_THRESHOLD_LOW         13.0
 #define INPUT_VOLTAGE                 A0
 #define SAMPLES                       5
 #define LED_PIN                       D4
 #define RELAY_PIN                     D3
 #define RELAY_ACTIVATION_DELAY        20000
-#define ALTERNATOR_ACTIVE_STATE       LOW
-#define USE_PWM                      true
-#define MAX_CHARGE_CURRENT_PWM       1024
+#define ALTERNATOR_ACTIVE_STATE       HIGH
+#define USE_PWM                       true
+#define MAX_CHARGE_CURRENT_PWM        1024
 
 // PID Configuration
-#define PID_SAMPLE_TIME       1000   // ms
+#define PID_SAMPLE_TIME       20   // ms
 double pidInput, pidOutput;
-double Setpoint=14.4, Kp=2, Ki=5, Kd=1;
+double Setpoint=140.0, Kp=30, Ki=3, Kd=1;
 PID chargePID(&pidInput, &pidOutput, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 // Global state
