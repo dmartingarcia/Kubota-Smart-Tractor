@@ -12,7 +12,7 @@ class OutputComponent {
     uint16_t maxPWM;
 
   public:
-    OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeLow, uint16_t maxPWMValue = 800);
+    OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue = 1024);
 
     void set(bool state);
     void pwm(uint16_t value);

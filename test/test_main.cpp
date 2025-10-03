@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <unity.h>
-#include "../src/main.h"
+#include "../src/main.cpp"
 #include "../src/WebHandler.h"
 
 // Mock replacements

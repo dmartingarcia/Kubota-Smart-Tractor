@@ -7,10 +7,10 @@
 #include "output_component.h"
 #include <Arduino.h>
 
-OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeLow, uint16_t maxPWMValue)
+OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue)
   : pin(outputPin),
     isPWM(pwmEnabled),
-    activeState(!activeLow),
+    activeState(activeState),
     currentPWM(0),
     maxPWM(maxPWMValue)
 {

@@ -80,9 +80,14 @@ void setup() {
 
   // Hardware setup
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
   pinMode(RELAY_PIN, OUTPUT);
-  alternator.off();
+  digitalWrite(LED_PIN, HIGH);
+  digitalWrite(RELAY_PIN, HIGH);
+  delay(5000);
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(LED_PIN, LOW);
+  delay(5000);
+
 
   // Initialize PID
   if(USE_PWM) {
@@ -127,8 +132,10 @@ void manage_alternator() {
         alternator.pwm(MAX_CHARGE_CURRENT_PWM);
       } else {
         int targetPWM = static_cast<int>(pidOutput);
-        Serial.printf("PID - Current Voltage: %.2fV, Target PWM: %d\n", pidInput, targetPWM);
+        Serial.printf("PID - Current Voltage: %.2fV, Target PWM: %d\n", current_voltage, targetPWM);
         alternator.pwm(targetPWM);
+
+        analogWrite(LED_PIN, map(targetPWM, 0, MAX_CHARGE_CURRENT_PWM, 300, 1023));
       }
     }
   } else {
@@ -166,49 +173,12 @@ void store_data() {
   Serial.println();
 }
 
-// Modified toggle_led to reflect PWM status
-void toggle_led() {
-  const unsigned long now = millis();
-
-  // Pattern configuration
-  uint8_t blink_pattern =
-    (!connected) ? 3 :                     // WiFi Failed: Double flash
-    (alternator.isActive()) ?
-      (alternator.isPWMEnabled() ? 2 : 1)  // PWM: Fast blink, Relay: Solid
-      : 0;                                 // Inactive: Slow blink
-
-  // Timing configuration
-  const uint16_t intervals[] = {
-    2000,  // Pattern 0: Slow blink (0.2Hz)
-    1000,  // Pattern 1: Solid ON (1Hz)
-    500,   // Pattern 2: Fast blink (2Hz)
-    250    // Pattern 4: Double flash (0.5Hz)
-  };
-
-  // State machine
-  if(now - last_led_toggle >= intervals[blink_pattern]) {
-    switch(blink_pattern) {
-      case 1: // Solid ON (Relay Active)
-        digitalWrite(LED_PIN, alternator.isActive() ? LOW : HIGH);
-        break;
-      case 2: // Fast blink (2Hz) PWM active
-        analogWrite(LED_PIN, alternator.getPWM());
-      case 0: // Slow blink (1Hz) Alternator inactive
-      case 3: // Double flash (0.5Hz) WiFi connection failed
-        digitalWrite(LED_PIN, led_state);
-        led_state = !led_state;
-        break;
-    }
-    last_led_toggle = now;
-  }
-}
-
 unsigned long lastDataStore = 0;
 unsigned long lastWifiConnection = 0;
 
 void loop() {
   unsigned long currentMillis = millis();
-  float current_voltage = read_voltage();
+  current_voltage = read_voltage();
 
   // Check AP status
   if (WiFi.getMode() != WIFI_AP) {
@@ -224,7 +194,6 @@ void loop() {
   }
 
   manage_alternator();
-  toggle_led();
 
   // Data Storage (5000ms interval)
   if(currentMillis - lastDataStore >= 5000) {
