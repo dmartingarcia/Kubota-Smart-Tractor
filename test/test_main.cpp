@@ -1,110 +1,446 @@
-#include <Arduino.h>
 #include <unity.h>
-#include "../src/main.cpp"
-#include "../src/WebHandler.h"
+#include "../src/charging/VoltageSensor.h"
+#include "../src/charging/AlternatorLogic.h"
+#include "../src/connectivity/WifiManager.h"
+#include "../src/charging/PidAutotuner.h"
+#include "../src/storage/UsageCounters.h"
+#include "../src/connectivity/MqttPublisher.h"
+#include "../src/storage/MaintenanceLog.h"
+#include <string.h>
 
-// Mock replacements
-unsigned long fakeMillis = 0;
-int mockAnalogRead = 0;
-uint8_t relayPinState;
+void setUp() {}
+void tearDown() {}
 
-void setUp() {
-    // Reset state before each test
-    fakeMillis = 0;
-    historyIndex = 0;
-    relay_state = ALTERNATOR_ACTIVE_STATE;
-    next_relay_check = 0;
-    memset(history, 0, sizeof(history));
-    relayPinState = ALTERNATOR_ACTIVE_STATE;
+// Test-only fake driver: no real WiFi, fully controllable/inspectable.
+class FakeWifiDriver : public IWifiDriver {
+  public:
+    StaLinkStatus statusToReport = StaLinkStatus::CONNECTING;
+    int beginSTACalls = 0;
+    int beginAPCalls = 0;
+
+    void beginSTA(const char*, const char*) override { beginSTACalls++; }
+    StaLinkStatus staStatus() override { return statusToReport; }
+    void beginAP(const char*, const char*) override { beginAPCalls++; }
+};
+
+void test_voltage_calibration() {
+    // 2.90V at A0 corresponds to the calibrated 15.25V reference.
+    float raw = (2.90f / 3.3f) * 1024.0f;
+    TEST_ASSERT_FLOAT_WITHIN(0.05, 15.25, calibrate_voltage(raw, 1024.0, 3.3, 15.25, 2.90));
+
+    // Half the reference reading should give half the reference voltage.
+    raw = (1.45f / 3.3f) * 1024.0f;
+    TEST_ASSERT_FLOAT_WITHIN(0.05, 7.625, calibrate_voltage(raw, 1024.0, 3.3, 15.25, 2.90));
 }
 
-void tearDown() {
-    // Clean up after each test
+void test_pwm_safety_thresholds() {
+    TEST_ASSERT_EQUAL(static_cast<int>(ChargeAction::OFF), static_cast<int>(decide_pwm_safety_action(14.8, 14.6, 13.0)));
+    TEST_ASSERT_EQUAL(static_cast<int>(ChargeAction::OFF), static_cast<int>(decide_pwm_safety_action(14.6, 14.6, 13.0))); // boundary is inclusive
+    TEST_ASSERT_EQUAL(static_cast<int>(ChargeAction::MAX_CHARGE), static_cast<int>(decide_pwm_safety_action(12.5, 14.6, 13.0)));
+    TEST_ASSERT_EQUAL(static_cast<int>(ChargeAction::RUN_PID), static_cast<int>(decide_pwm_safety_action(14.0, 14.6, 13.0)));
 }
 
-// Mock implementations
-unsigned long millis() {
-    return fakeMillis;
+void test_relay_overvoltage_turns_off_and_starts_delay() {
+    RelayDecision d = decide_relay_state(true, 15.0, 1000, 0, 14.8, 14.0, 20000);
+    TEST_ASSERT_TRUE(d.changed);
+    TEST_ASSERT_FALSE(d.state);
+    TEST_ASSERT_EQUAL_UINT32(21000, d.nextCheck);
 }
 
-int analogRead(uint8_t) {
-    return mockAnalogRead;
+void test_relay_stays_off_during_delay_window() {
+    // Between thresholds, delay not yet elapsed -> no change.
+    RelayDecision d = decide_relay_state(false, 14.5, 5000, 21000, 14.8, 14.0, 20000);
+    TEST_ASSERT_FALSE(d.changed);
+    TEST_ASSERT_FALSE(d.state);
 }
 
-void digitalWrite(uint8_t pin, uint8_t val) {
-    if(pin == RELAY_PIN) relayPinState = val;
+void test_relay_turns_on_below_low_threshold_after_delay() {
+    RelayDecision d = decide_relay_state(false, 13.5, 25000, 21000, 14.8, 14.0, 20000);
+    TEST_ASSERT_TRUE(d.changed);
+    TEST_ASSERT_TRUE(d.state);
+    TEST_ASSERT_EQUAL_UINT32(45000, d.nextCheck);
 }
 
-void test_voltage_calculation() {
-    // Test calibration calculation
-    CALIBRATION_IN_VOLTAGE = 15.25;
-    CALIBRATION_A0_VOLTAGE = 2.90;
-
-    // Simulate 2.9V at A0 (15.25V real voltage)
-    mockAnalogRead = (2.90 / 3.3) * 1023;
-    TEST_ASSERT_FLOAT_WITHIN(0.1, 15.25, read_voltage());
-
-    // Test lower voltage
-    mockAnalogRead = (2.0 / 3.3) * 1023;
-    float expected = (15.25 / 2.90) * 2.0;
-    TEST_ASSERT_FLOAT_WITHIN(0.1, expected, read_voltage());
+void test_should_run_cycle_respects_interval() {
+    TEST_ASSERT_FALSE(should_run_cycle(10, 0, 20));   // 10ms elapsed, interval 20ms -> not yet
+    TEST_ASSERT_TRUE(should_run_cycle(20, 0, 20));     // exactly on interval -> run
+    TEST_ASSERT_TRUE(should_run_cycle(25, 0, 20));     // past interval -> run
 }
 
-void test_relay_control() {
-    VOLTAGE_THRESHOLD_HIGH = 14.8;
-    VOLTAGE_THRESHOLD_LOW = 14.0;
-
-    // Initial state
-    TEST_ASSERT_EQUAL(ALTERNATOR_ACTIVE_STATE, relay_state);
-
-    // Test over-voltage detection
-    manage_relay(15.0);
-    TEST_ASSERT_EQUAL(!ALTERNATOR_ACTIVE_STATE, relay_state);
-    TEST_ASSERT_EQUAL(RELAY_ACTIVATION_DELAY, next_relay_check - fakeMillis);
-
-    // Test hysteresis
-    fakeMillis += RELAY_ACTIVATION_DELAY;
-    manage_relay(14.5);  // Between thresholds
-    TEST_ASSERT_EQUAL(!ALTERNATOR_ACTIVE_STATE, relay_state);
+void test_should_run_cycle_handles_millis_rollover() {
+    // lastRunMillis close to ULONG_MAX, currentMillis wrapped to a small value:
+    // unsigned subtraction wraps around correctly and should still fire on schedule.
+    unsigned long lastRun = static_cast<unsigned long>(-5);  // ULONG_MAX - 4
+    unsigned long current = 15;                              // 20ms later after wraparound
+    TEST_ASSERT_TRUE(should_run_cycle(current, lastRun, 20));
+    TEST_ASSERT_FALSE(should_run_cycle(10, lastRun, 20));
 }
 
-void test_data_storage() {
-    // Test history buffer
-    for(int i=0; i<130; i++) {
-        fakeMillis = i * 500;
-        store_data();
+void test_wifi_manager_connects_sta_before_timeout() {
+    FakeWifiDriver driver;
+    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
+    wm.begin(0);
+    TEST_ASSERT_EQUAL(1, driver.beginSTACalls);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
+
+    driver.statusToReport = StaLinkStatus::CONNECTED;
+    wm.update(5000);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTED_STA), static_cast<int>(wm.mode()));
+    TEST_ASSERT_EQUAL(0, driver.beginAPCalls);
+}
+
+void test_wifi_manager_falls_back_to_ap_after_timeout() {
+    FakeWifiDriver driver;
+    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
+    wm.begin(0);
+
+    driver.statusToReport = StaLinkStatus::CONNECTING;
+    wm.update(5000);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
+
+    wm.update(10000); // timeout reached, still not connected
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
+    TEST_ASSERT_EQUAL(1, driver.beginAPCalls);
+}
+
+void test_wifi_manager_retries_sta_periodically_from_ap_fallback() {
+    FakeWifiDriver driver;
+    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
+    wm.begin(0);
+    wm.update(10000); // -> AP_FALLBACK
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
+
+    wm.update(30000); // retry interval not elapsed yet
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
+    TEST_ASSERT_EQUAL(1, driver.beginSTACalls);
+
+    wm.update(70000); // 60s retry interval elapsed since AP fallback started at 10000
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
+    TEST_ASSERT_EQUAL(2, driver.beginSTACalls);
+}
+
+void test_wifi_manager_reconnects_sta_after_drop() {
+    FakeWifiDriver driver;
+    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
+    wm.begin(0);
+    driver.statusToReport = StaLinkStatus::CONNECTED;
+    wm.update(1000);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTED_STA), static_cast<int>(wm.mode()));
+
+    driver.statusToReport = StaLinkStatus::FAILED;
+    wm.update(2000);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
+    TEST_ASSERT_EQUAL(2, driver.beginSTACalls);
+}
+
+void test_wifi_manager_skips_sta_when_ssid_empty() {
+    FakeWifiDriver driver;
+    WifiManager wm(driver, "", "", "AP", "appw", 10000, 60000);
+    wm.begin(0);
+    TEST_ASSERT_EQUAL(0, driver.beginSTACalls);
+    TEST_ASSERT_EQUAL(1, driver.beginAPCalls);
+    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
+}
+
+void test_autotune_computes_gains_from_relay_oscillation() {
+    // setpoint=140, noiseBand=2 -> switches at 142 (up) / 138 (down).
+    // Feeding a clean 130<->150 triangle wave, period 1000ms, amplitude 10.
+    PidAutotuner tuner(140.0, 500.0, 200.0, 2.0, 4, 60000);
+    tuner.begin(0);
+    double inputs[] = {130, 150, 130, 150, 130, 150};
+    unsigned long times[] = {0, 500, 1000, 1500, 2000, 2500};
+    double lastOutput = 0;
+    for (int i = 0; i < 6; i++) {
+        lastOutput = tuner.update(inputs[i], times[i]);
     }
+    TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::SUCCEEDED), static_cast<int>(tuner.state()));
 
-    // Should wrap around after 120 entries
-    TEST_ASSERT_EQUAL(10, historyIndex);
-    TEST_ASSERT_EQUAL(129*500, history[9].timestamp);
+    AutotuneGains g = tuner.gains();
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 1000.0, g.pu);
+    TEST_ASSERT_FLOAT_WITHIN(0.1, 25.46, g.ku);
+    TEST_ASSERT_FLOAT_WITHIN(0.1, 15.28, g.kp);
+    TEST_ASSERT_FLOAT_WITHIN(0.1, 30.56, g.ki);
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 1.91, g.kd);
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 300.0, lastOutput); // last switch was to relayHigh_=false -> base-step
 }
 
-void test_web_handlers() {
-    // Initialize test data
-    history[0] = {1000, 14.5, true};
-    historyIndex = 1;
-    relay_state = true;
-
-    // Test /data endpoint
-    handleData();
-    TEST_ASSERT_TRUE(server.hasArg("voltage"));
-
-    // Test /history endpoint
-    handleHistory();
-    TEST_ASSERT_TRUE(server.hasArg("timestamp"));
+void test_autotune_fails_on_zero_amplitude() {
+    // noiseBand=0 -> input==setpoint satisfies both switch conditions every call,
+    // so peakMax_/peakMin_ never diverge from setpoint: genuine zero amplitude.
+    PidAutotuner tuner(140.0, 500.0, 200.0, 0.0, 2, 60000);
+    tuner.begin(0);
+    for (int i = 0; i < 4; i++) {
+        tuner.update(140.0, i * 100);
+    }
+    TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::FAILED), static_cast<int>(tuner.state()));
 }
 
-void setup() {
+void test_autotune_update_after_completion_is_a_no_op() {
+    PidAutotuner tuner(140.0, 500.0, 200.0, 2.0, 4, 60000);
+    tuner.begin(0);
+    double inputs[] = {130, 150, 130, 150, 130, 150};
+    unsigned long times[] = {0, 500, 1000, 1500, 2000, 2500};
+    for (int i = 0; i < 6; i++) tuner.update(inputs[i], times[i]);
+    TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::SUCCEEDED), static_cast<int>(tuner.state()));
+    AutotuneGains before = tuner.gains();
+
+    double out = tuner.update(9999.0, 999999); // must not recompute/crash once finished
+    TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::SUCCEEDED), static_cast<int>(tuner.state()));
+    TEST_ASSERT_EQUAL_FLOAT(before.kp, tuner.gains().kp);
+    TEST_ASSERT_TRUE(out == 300.0 || out == 700.0); // still just the relay output level
+}
+
+void test_autotune_fails_if_no_oscillation_within_runtime() {
+    PidAutotuner tuner(140.0, 500.0, 200.0, 2.0, 4, 1000);
+    tuner.begin(0);
+    tuner.update(140.0, 500);  // sits right at setpoint, never crosses noise band
+    tuner.update(140.0, 1500); // past maxRuntimeMs with zero switches
+    TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::FAILED), static_cast<int>(tuner.state()));
+}
+
+// Test-only fake store: in-memory blob, no real flash.
+class InMemoryFlashStore : public IFlashStore {
+  public:
+    uint8_t buffer[64];
+    bool hasData = false;
+    int writeCalls = 0;
+
+    bool readBlob(void* out, size_t size) override {
+        if (!hasData || size > sizeof(buffer)) return false;
+        memcpy(out, buffer, size);
+        return true;
+    }
+    bool writeBlob(const void* in, size_t size) override {
+        if (size > sizeof(buffer)) return false;
+        memcpy(buffer, in, size);
+        hasData = true;
+        writeCalls++;
+        return true;
+    }
+};
+
+void test_usage_counters_first_boot_uses_defaults() {
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 250, 300);
+    counters.begin(0);
+    TEST_ASSERT_EQUAL_UINT32(0, counters.totalRunSeconds());
+    TEST_ASSERT_EQUAL_UINT32(250, counters.serviceIntervalHours());
+    TEST_ASSERT_EQUAL(1, store.writeCalls); // initial defaults get persisted
+}
+
+void test_usage_counters_accumulate_only_while_engine_active() {
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 250, 300);
+    counters.begin(0);
+    counters.tick(true, 10000);   // 10s active
+    counters.tick(false, 20000);  // 10s idle, not counted
+    counters.tick(true, 25000);   // 5s active
+    TEST_ASSERT_EQUAL_UINT32(15, counters.totalRunSeconds());
+    TEST_ASSERT_EQUAL_UINT32(15, counters.secondsSinceService());
+}
+
+void test_usage_counters_throttles_writes() {
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 250, 300); // save every 300s of accumulated runtime
+    counters.begin(0);
+    int callsAfterInit = store.writeCalls;
+    counters.tick(true, 100000); // 100s active, below threshold
+    TEST_ASSERT_EQUAL(callsAfterInit, store.writeCalls);
+    counters.tick(true, 400000); // +300s -> crosses threshold
+    TEST_ASSERT_EQUAL(callsAfterInit + 1, store.writeCalls);
+}
+
+void test_usage_counters_reset_and_reload_across_reboot() {
+    InMemoryFlashStore store;
+    {
+        UsageCounters counters(store, 250, 300);
+        counters.begin(0);
+        counters.tick(true, 500000); // 500s active
+        counters.setServiceIntervalHours(100);
+        TEST_ASSERT_FALSE(counters.isMaintenanceDue());
+    }
+    // Simulate reboot: new instance, same underlying store.
+    UsageCounters reloaded(store, 250, 300);
+    reloaded.begin(0);
+    TEST_ASSERT_EQUAL_UINT32(500, reloaded.totalRunSeconds());
+    TEST_ASSERT_EQUAL_UINT32(500, reloaded.secondsSinceService());
+    TEST_ASSERT_EQUAL_UINT32(100, reloaded.serviceIntervalHours());
+
+    reloaded.resetMaintenanceCounter();
+    TEST_ASSERT_EQUAL_UINT32(0, reloaded.secondsSinceService());
+    TEST_ASSERT_EQUAL_UINT32(500, reloaded.totalRunSeconds()); // total hours unaffected by service reset
+}
+
+void test_usage_counters_boot_count_increments_each_boot() {
+    InMemoryFlashStore store;
+    {
+        UsageCounters counters(store, 250, 300);
+        counters.begin(0);
+        TEST_ASSERT_EQUAL_UINT32(1, counters.bootCount());
+    }
+    UsageCounters rebooted(store, 250, 300);
+    rebooted.begin(1000);
+    TEST_ASSERT_EQUAL_UINT32(2, rebooted.bootCount());
+}
+
+void test_usage_counters_maintenance_due() {
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 1, 300); // 1-hour service interval
+    counters.begin(0);
+    counters.tick(true, 3599 * 1000UL);
+    TEST_ASSERT_FALSE(counters.isMaintenanceDue());
+    counters.tick(true, 3601 * 1000UL);
+    TEST_ASSERT_TRUE(counters.isMaintenanceDue());
+}
+
+// Test-only fake MQTT transport: no real network.
+class FakeMqttTransport : public IMqttTransport {
+  public:
+    bool connectedState = false;
+    bool connectResult = true;
+    int connectCalls = 0;
+    int publishCalls = 0;
+
+    bool connected() override { return connectedState; }
+    bool connect() override {
+        connectCalls++;
+        connectedState = connectResult;
+        return connectResult;
+    }
+    bool publish(const char*, const char*, bool) override {
+        publishCalls++;
+        return true;
+    }
+    void loop() override {}
+};
+
+MqttReading make_reading(unsigned long ts) {
+    return MqttReading{ts, 14.2f, 500, true, false, 3600, false};
+}
+
+void test_mqtt_buffers_when_network_unavailable() {
+    FakeMqttTransport t;
+    MqttPublisher pub(t, 5, 30000);
+    pub.update(false, make_reading(1000), 1000);
+    TEST_ASSERT_EQUAL(0, t.connectCalls);
+    TEST_ASSERT_EQUAL(0, t.publishCalls);
+    TEST_ASSERT_EQUAL(1, static_cast<int>(pub.bufferedCount()));
+}
+
+void test_mqtt_throttles_reconnect_attempts() {
+    FakeMqttTransport t;
+    t.connectResult = false; // always fails
+    MqttPublisher pub(t, 5, 30000);
+    pub.update(true, make_reading(0), 0);       // first call -> attempts immediately
+    TEST_ASSERT_EQUAL(1, t.connectCalls);
+    pub.update(true, make_reading(10000), 10000); // within interval -> no retry
+    TEST_ASSERT_EQUAL(1, t.connectCalls);
+    pub.update(true, make_reading(31000), 31000); // past interval -> retries
+    TEST_ASSERT_EQUAL(2, t.connectCalls);
+}
+
+void test_mqtt_flushes_buffer_and_publishes_on_reconnect() {
+    FakeMqttTransport t;
+    MqttPublisher pub(t, 5, 30000);
+    pub.update(true, make_reading(0), 0); // not connected: buffers + triggers successful connect
+    TEST_ASSERT_EQUAL(1, static_cast<int>(pub.bufferedCount()));
+    TEST_ASSERT_EQUAL(0, pub.publishCount());
+
+    pub.update(true, make_reading(100), 100); // now connected: discovery + flush(1) + latest(1)
+    TEST_ASSERT_EQUAL(0, static_cast<int>(pub.bufferedCount()));
+    TEST_ASSERT_EQUAL(2, pub.publishCount());
+    TEST_ASSERT_EQUAL(6, t.publishCalls); // 4 discovery configs + 2 state publishes
+
+    pub.update(true, make_reading(200), 200); // already connected, discovery not repeated
+    TEST_ASSERT_EQUAL(3, pub.publishCount());
+    TEST_ASSERT_EQUAL(7, t.publishCalls);
+}
+
+void test_mqtt_buffer_drops_oldest_when_full() {
+    FakeMqttTransport t;
+    MqttPublisher pub(t, 2, 30000); // capacity 2
+    pub.update(false, make_reading(1), 1);
+    pub.update(false, make_reading(2), 2);
+    pub.update(false, make_reading(3), 3); // drops reading #1
+    TEST_ASSERT_EQUAL(2, static_cast<int>(pub.bufferedCount()));
+}
+
+void test_sanitize_note_escapes_commas_and_newlines() {
+    char out[40];
+    sanitize_note("Oil change, filter\nreplaced", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("Oil change; filter replaced", out);
+}
+
+void test_sanitize_note_truncates_to_buffer() {
+    char out[8];
+    sanitize_note("Way too long a note", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("Way too", out); // 7 chars + NUL
+}
+
+// Test-only fake log store: in-memory, append-order.
+class InMemoryLogStore : public IMaintenanceLogStore {
+  public:
+    MaintenanceLogEntry entries[10];
+    size_t count = 0;
+
+    bool append(const MaintenanceLogEntry& e) override {
+        if (count >= 10) return false;
+        entries[count++] = e;
+        return true;
+    }
+    size_t readAll(MaintenanceLogEntry* out, size_t maxEntries) override {
+        size_t n = count < maxEntries ? count : maxEntries;
+        for (size_t i = 0; i < n; i++) out[i] = entries[i];
+        return n;
+    }
+};
+
+void test_maintenance_log_add_and_read_roundtrip() {
+    InMemoryLogStore store;
+    MaintenanceLog log(store);
+    TEST_ASSERT_TRUE(log.addEntry(1700000000, 128, "Oil change"));
+    TEST_ASSERT_TRUE(log.addEntry(0, 140, "Filter, replaced"));
+
+    MaintenanceLogEntry out[10];
+    size_t n = log.getEntries(out, 10);
+    TEST_ASSERT_EQUAL(2, static_cast<int>(n));
+    TEST_ASSERT_EQUAL_UINT32(1700000000, out[0].epochSeconds);
+    TEST_ASSERT_EQUAL_UINT32(128, out[0].runHours);
+    TEST_ASSERT_EQUAL_STRING("Oil change", out[0].note);
+    TEST_ASSERT_EQUAL_UINT32(0, out[1].epochSeconds);
+    TEST_ASSERT_EQUAL_STRING("Filter; replaced", out[1].note);
+}
+
+int main(int argc, char **argv) {
     UNITY_BEGIN();
-    RUN_TEST(test_voltage_calculation);
-    RUN_TEST(test_relay_control);
-    RUN_TEST(test_data_storage);
-    RUN_TEST(test_web_handlers);
-    UNITY_END();
-}
-
-void loop() {
-    // No loop logic needed for tests
-    // In a real application, this would be the main loop
+    RUN_TEST(test_voltage_calibration);
+    RUN_TEST(test_pwm_safety_thresholds);
+    RUN_TEST(test_relay_overvoltage_turns_off_and_starts_delay);
+    RUN_TEST(test_relay_stays_off_during_delay_window);
+    RUN_TEST(test_relay_turns_on_below_low_threshold_after_delay);
+    RUN_TEST(test_should_run_cycle_respects_interval);
+    RUN_TEST(test_should_run_cycle_handles_millis_rollover);
+    RUN_TEST(test_wifi_manager_connects_sta_before_timeout);
+    RUN_TEST(test_wifi_manager_falls_back_to_ap_after_timeout);
+    RUN_TEST(test_wifi_manager_retries_sta_periodically_from_ap_fallback);
+    RUN_TEST(test_wifi_manager_reconnects_sta_after_drop);
+    RUN_TEST(test_wifi_manager_skips_sta_when_ssid_empty);
+    RUN_TEST(test_autotune_computes_gains_from_relay_oscillation);
+    RUN_TEST(test_autotune_fails_if_no_oscillation_within_runtime);
+    RUN_TEST(test_autotune_fails_on_zero_amplitude);
+    RUN_TEST(test_autotune_update_after_completion_is_a_no_op);
+    RUN_TEST(test_usage_counters_first_boot_uses_defaults);
+    RUN_TEST(test_usage_counters_accumulate_only_while_engine_active);
+    RUN_TEST(test_usage_counters_throttles_writes);
+    RUN_TEST(test_usage_counters_reset_and_reload_across_reboot);
+    RUN_TEST(test_usage_counters_maintenance_due);
+    RUN_TEST(test_usage_counters_boot_count_increments_each_boot);
+    RUN_TEST(test_mqtt_buffers_when_network_unavailable);
+    RUN_TEST(test_mqtt_throttles_reconnect_attempts);
+    RUN_TEST(test_mqtt_flushes_buffer_and_publishes_on_reconnect);
+    RUN_TEST(test_mqtt_buffer_drops_oldest_when_full);
+    RUN_TEST(test_sanitize_note_escapes_commas_and_newlines);
+    RUN_TEST(test_sanitize_note_truncates_to_buffer);
+    RUN_TEST(test_maintenance_log_add_and_read_roundtrip);
+    return UNITY_END();
 }

@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  native-tests:
+    name: Native unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Run native tests (TDD suite - see README Testing section)
+        run: pio test -e native
+
+  coverage:
+    name: Coverage (gate on native suite)
+    runs-on: ubuntu-latest
+    needs: native-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO + gcovr
+        run: pip install --upgrade platformio gcovr
+
+      - name: Build + run instrumented tests
+        run: pio test -e coverage
+
+      - name: Coverage report (fails the job if it drops)
+        run: |
+          gcovr --root . \
+            --filter 'src/charging/.*' --filter 'src/connectivity/.*' --filter 'src/storage/.*' \
+            --object-directory .pio/build/coverage \
+            --fail-under-line 90 --fail-under-function 90 \
+            --print-summary \
+            --html-details coverage.html \
+          | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage*.html
+
+  firmware-build:
+    name: Firmware build (d1_mini)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Use placeholder secrets (compile-check only, no real credentials)
+        run: cp src/secrets.h.tpl src/secrets.h
+
+      - name: Build firmware
+        run: pio run -e d1_mini
