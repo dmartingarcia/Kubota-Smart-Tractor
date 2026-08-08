@@ -17,7 +17,10 @@ cd "$(dirname "$0")/.."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-openssl req -x509 -nodes -newkey rsa:2048 \
+# EC (P-256), not RSA: an RSA handshake needs far more heap than this device has free
+# alongside everything else running (BearSSL's RSA modexp scratch space alone doesn't
+# fit) - EC handshakes are cheap enough to actually complete.
+openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
   -keyout "$TMP_DIR/key.pem" -out "$TMP_DIR/cert.pem" \
   -days 3650 -subj "/CN=kubotio.local"
 

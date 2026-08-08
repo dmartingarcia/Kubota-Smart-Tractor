@@ -35,11 +35,19 @@ const char GPS_PAGE[] PROGMEM = R"=====(
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e9ecef; font-size: 0.85em; }
     .note { font-size: 0.8em; color: #6c757d; }
+    select, input, button, img, canvas { max-width: 100%; }
+    .row .label { flex: 1 1 auto; }
+    .row .value { flex: 0 0 auto; text-align: right; }
+    @media (max-width: 400px) {
+      body { padding: 10px; }
+      .card { padding: 12px; }
+    }
   </style>
 </head>
 <body>
   <a id="backLink" href="#">&larr; Back to dashboard (HTTP)</a>
   <h1>GPS Tracking</h1>
+  <button class="danger" onclick="disableGps()">Disable GPS &amp; back to dashboard</button>
 
   <div class="card">
     <div class="row"><span class="label">Permission</span><span class="value" id="permStatus">not requested</span></div>
@@ -91,6 +99,12 @@ const char GPS_PAGE[] PROGMEM = R"=====(
 
   <script>
     document.getElementById('backLink').href = 'http://' + location.hostname + '/';
+    // Full navigation (not fetch): an https page can't fetch() a plain http endpoint
+    // (mixed content), but a top-level navigation to it is fine, and the server
+    // redirects back to the dashboard afterward.
+    function disableGps() {
+      location.href = 'http://' + location.hostname + '/gps/disable?redirect=1';
+    }
 
     // --- IndexedDB: one object store, points tagged with a sessionId (session start ms) ---
     const DB_NAME = 'kubotio-gps', STORE = 'points';
@@ -393,8 +407,13 @@ const char GPS_PAGE[] PROGMEM = R"=====(
 
       const padX = parcel.maxX * 0.1 || 10, padY = parcel.maxY * 0.1 || 10;
       const viewMinX = -padX, viewMaxX = parcel.maxX + padX, viewMinY = -padY, viewMaxY = parcel.maxY + padY;
-      const xForM = mx => (mx - viewMinX) / (viewMaxX - viewMinX) * w;
-      const yForM = my => h - (my - viewMinY) / (viewMaxY - viewMinY) * h;
+      // Single uniform scale (like object-fit: contain) so the parcel isn't stretched
+      // to fill the canvas - letterbox on whichever axis has spare room instead.
+      const spanX = viewMaxX - viewMinX, spanY = viewMaxY - viewMinY;
+      const scale = Math.min(w / spanX, h / spanY);
+      const offsetX = (w - spanX * scale) / 2, offsetY = (h - spanY * scale) / 2;
+      const xForM = mx => offsetX + (mx - viewMinX) * scale;
+      const yForM = my => h - offsetY - (my - viewMinY) * scale;
 
       if (!parcelPhotoImg || parcelPhotoImg.dataset.ref !== parcel.ref) {
         const minCorner = toLatLon(viewMinX, viewMinY, parcel.originLat, parcel.originLon);
@@ -411,17 +430,18 @@ const char GPS_PAGE[] PROGMEM = R"=====(
       }
 
       ctx.clearRect(0, 0, w, h);
-      if (parcelPhotoImg.complete && parcelPhotoImg.naturalWidth) ctx.drawImage(parcelPhotoImg, 0, 0, w, h);
+      if (parcelPhotoImg.complete && parcelPhotoImg.naturalWidth) {
+        ctx.drawImage(parcelPhotoImg, offsetX, offsetY, spanX * scale, spanY * scale);
+      }
 
       ctx.fillStyle = 'rgba(40,167,69,0.55)';
-      const cellPxW = cellSizePx(parcel.cellSize, viewMinX, viewMaxX, w);
-      const cellPxH = cellSizePx(parcel.cellSize, viewMinY, viewMaxY, h);
+      const cellPx = parcel.cellSize * scale;
       for (let gy = 0; gy < parcel.gridH; gy++) {
         for (let gx = 0; gx < parcel.gridW; gx++) {
           const idx = gy * parcel.gridW + gx;
           if (parcel.eligible[idx] && parcel.covered.has(idx)) {
             const x = xForM(gx * parcel.cellSize), y = yForM((gy + 1) * parcel.cellSize);
-            ctx.fillRect(x, y, cellPxW, cellPxH);
+            ctx.fillRect(x, y, cellPx, cellPx);
           }
         }
       }
@@ -443,9 +463,6 @@ const char GPS_PAGE[] PROGMEM = R"=====(
         ctx.arc(xForM(p.x), yForM(p.y), 6, 0, 2 * Math.PI);
         ctx.fill();
       }
-    }
-    function cellSizePx(cellMeters, viewMin, viewMax, pxSize) {
-      return cellMeters / (viewMax - viewMin) * pxSize;
     }
 
     function markCoverage(pos) {
@@ -500,10 +517,17 @@ bool gps_https_start() {
   if (server != nullptr) return true;  // already running
 
   server = new BearSSL::ESP8266WebServerSecure(443);
-  sessionCache = new BearSSL::ServerSessions(5);
-  server->getServer().setRSACert(new BearSSL::X509List(GPS_HTTPS_CERT), new BearSSL::PrivateKey(GPS_HTTPS_KEY));
+  sessionCache = new BearSSL::ServerSessions(1); // one phone at a time realistically; save heap
+  // Default BearSSL buffers (~16KB in, ~1KB out) don't fit in the ~22KB free heap
+  // this firmware runs with alongside everything else - handshake silently dies
+  // with zero bytes sent back. Small buffers are plenty for these simple GETs.
+  server->getServer().setBufferSizes(1024, 1024);
+  // EC cert/key (see generate_gps_cert.sh): an RSA handshake's modexp scratch space
+  // alone doesn't fit in the free heap here, EC is cheap enough to actually complete.
+  server->getServer().setECCert(new BearSSL::X509List(GPS_HTTPS_CERT), BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN,
+                                 new BearSSL::PrivateKey(GPS_HTTPS_KEY));
   server->getServer().setCache(sessionCache);
-  server->on("/", handleGpsRoot);
+  server->on("/gps", handleGpsRoot);
   server->begin();
   return true;
 }
