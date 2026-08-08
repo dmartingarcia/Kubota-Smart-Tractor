@@ -3,6 +3,7 @@
 #include "../src/charging/AlternatorLogic.h"
 #include "../src/connectivity/WifiManager.h"
 #include "../src/charging/PidAutotuner.h"
+#include "../src/charging/EngineDetector.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
@@ -21,6 +22,7 @@ class FakeWifiDriver : public IWifiDriver {
     void beginSTA(const char*, const char*) override { beginSTACalls++; }
     StaLinkStatus staStatus() override { return statusToReport; }
     void beginAP(const char*, const char*) override { beginAPCalls++; }
+    void stopSTA() override {}
 };
 
 void test_voltage_calibration() {
@@ -80,13 +82,14 @@ void test_wifi_manager_connects_sta_before_timeout() {
     FakeWifiDriver driver;
     WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
     wm.begin(0);
+    TEST_ASSERT_EQUAL(1, driver.beginAPCalls); // AP is always brought up immediately in begin()
     TEST_ASSERT_EQUAL(1, driver.beginSTACalls);
     TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
 
     driver.statusToReport = StaLinkStatus::CONNECTED;
     wm.update(5000);
     TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTED_STA), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(0, driver.beginAPCalls);
+    TEST_ASSERT_EQUAL(1, driver.beginAPCalls); // AP comes up unconditionally in begin(), stays up
 }
 
 void test_wifi_manager_falls_back_to_ap_after_timeout() {
@@ -196,6 +199,46 @@ void test_autotune_fails_if_no_oscillation_within_runtime() {
     tuner.update(140.0, 500);  // sits right at setpoint, never crosses noise band
     tuner.update(140.0, 1500); // past maxRuntimeMs with zero switches
     TEST_ASSERT_EQUAL(static_cast<int>(AutotuneState::FAILED), static_cast<int>(tuner.state()));
+}
+
+void test_engine_detector_starts_with_a_pulse() {
+    EngineDetector detector(2000, 60000, 0.3);
+    TEST_ASSERT_TRUE(detector.update(12.5, 0)); // first call always pulses
+    TEST_ASSERT_FALSE(detector.engineRunning());
+}
+
+void test_engine_detector_confirms_engine_running_on_voltage_rise() {
+    EngineDetector detector(2000, 60000, 0.3);
+    detector.update(12.5, 0);              // baseline captured at pulse start
+    TEST_ASSERT_TRUE(detector.update(12.9, 500)); // rose 0.4V mid-pulse -> keep driving
+    TEST_ASSERT_TRUE(detector.engineRunning());
+}
+
+void test_engine_detector_backs_off_after_a_dry_pulse() {
+    EngineDetector detector(2000, 60000, 0.3);
+    detector.update(12.5, 0);                       // pulse starts
+    TEST_ASSERT_TRUE(detector.update(12.5, 1000));  // still within pulse window, no rise yet
+    TEST_ASSERT_FALSE(detector.update(12.5, 2000)); // pulse window elapsed, no rise -> cooldown
+    TEST_ASSERT_FALSE(detector.engineRunning());
+}
+
+void test_engine_detector_waits_full_cooldown_before_next_pulse() {
+    EngineDetector detector(2000, 60000, 0.3);
+    detector.update(12.5, 0);
+    detector.update(12.5, 2000); // enters cooldown at t=2000
+    TEST_ASSERT_FALSE(detector.update(12.5, 40000)); // only 38s into 60s cooldown
+    TEST_ASSERT_TRUE(detector.update(12.5, 62000));  // 60s elapsed -> pulses again
+}
+
+void test_engine_detector_reset_clears_stale_state() {
+    EngineDetector detector(2000, 60000, 0.3);
+    detector.update(12.5, 0);
+    detector.update(12.9, 100); // engine confirmed running
+    TEST_ASSERT_TRUE(detector.engineRunning());
+
+    detector.reset();
+    TEST_ASSERT_FALSE(detector.engineRunning());
+    TEST_ASSERT_TRUE(detector.update(12.0, 200000)); // starts a fresh pulse, not stuck in old state
 }
 
 // Test-only fake store: in-memory blob, no real flash.
@@ -429,6 +472,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_autotune_fails_if_no_oscillation_within_runtime);
     RUN_TEST(test_autotune_fails_on_zero_amplitude);
     RUN_TEST(test_autotune_update_after_completion_is_a_no_op);
+    RUN_TEST(test_engine_detector_starts_with_a_pulse);
+    RUN_TEST(test_engine_detector_confirms_engine_running_on_voltage_rise);
+    RUN_TEST(test_engine_detector_backs_off_after_a_dry_pulse);
+    RUN_TEST(test_engine_detector_waits_full_cooldown_before_next_pulse);
+    RUN_TEST(test_engine_detector_reset_clears_stale_state);
     RUN_TEST(test_usage_counters_first_boot_uses_defaults);
     RUN_TEST(test_usage_counters_accumulate_only_while_engine_active);
     RUN_TEST(test_usage_counters_throttles_writes);

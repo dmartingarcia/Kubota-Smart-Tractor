@@ -9,6 +9,7 @@ class Esp8266WifiDriver : public IWifiDriver {
     void beginSTA(const char* ssid, const char* password) override;
     StaLinkStatus staStatus() override;
     void beginAP(const char* ssid, const char* password) override;
+    void stopSTA() override;
 };
 
 #endif

@@ -4,10 +4,11 @@
 #include <ESP8266WebServer.h>
 #include <ArduinoJson.h>
 #include "../storage/UsageCounters.h"
-#include "../connectivity/WifiManager.h"
 #include "../storage/MaintenanceLog.h"
 
 extern ESP8266WebServer server;
+
+#define HISTORY_SIZE 120 // ~10 minutes at the 5s store_data() cadence
 
 struct DataPoint {
     unsigned long timestamp;
@@ -25,7 +26,6 @@ extern bool engine_running;
 extern bool autotuneActive;
 void start_pid_autotune();
 extern UsageCounters usageCounters;
-extern WifiManager wifiManager;
 extern MaintenanceLog maintenanceLog;
 
 void handleAutotuneStart();
@@ -37,6 +37,8 @@ void handleMaintenanceLogAdd();
 void handleGpsEnable();
 void handleGpsDisable();
 void handleGpsStatus();
+void handleRestart();
+void handleMqttTest();
 
 void setupWebServer();
 void handleRoot();

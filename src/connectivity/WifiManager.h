@@ -12,6 +12,9 @@ class IWifiDriver {
     virtual void beginSTA(const char* ssid, const char* password) = 0;
     virtual StaLinkStatus staStatus() = 0;
     virtual void beginAP(const char* ssid, const char* password) = 0;
+    // Stops an in-progress/failed STA attempt so the radio isn't left scanning for
+    // an unreachable network in the background, which can starve the AP's beacons.
+    virtual void stopSTA() = 0;
 };
 
 enum class WifiMode { CONNECTING_STA, CONNECTED_STA, AP_FALLBACK };

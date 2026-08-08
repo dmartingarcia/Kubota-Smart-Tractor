@@ -1,6 +1,7 @@
 #include "WebHandler.h"
 #include <ArduinoJson.h>
 #include "../charging/output_component.h"
+#include "../connectivity/MqttPublisher.h"
 #include "HttpsGpsServer.h"
 #include <time.h>
 
@@ -20,6 +21,12 @@ extern OutputComponent alternator;
 extern DataPoint history[];
 extern byte historyIndex;
 extern bool engine_running;
+extern bool engine_probing;
+extern bool overvoltage_alert;
+extern bool wifiConnectedSta;
+extern unsigned long maxLoopDurationUs;
+extern MqttPublisher mqttPublisher;
+extern const char* mqtt_host;
 bool web_initialized = false;
 
 void setupWebServer() {
@@ -36,6 +43,9 @@ void setupWebServer() {
     server.on("/gps/enable", handleGpsEnable);
     server.on("/gps/disable", handleGpsDisable);
     server.on("/gps/status", handleGpsStatus);
+    server.on("/restart", handleRestart); // remote recovery when there's no physical/USB access
+    server.on("/mqtt/test", handleMqttTest);
+    server.onNotFound(handleRoot); // captive portal: any unknown host/path -> dashboard
     server.begin();
     Serial.println("Web server started");
     web_initialized = true;
@@ -76,6 +86,13 @@ void handleRoot() {
       input[type=number] { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; }
       #chartCard canvas { width: 100%; height: 260px; display: block; }
       .note { font-size: 0.8em; color: var(--label); margin-top: 8px; }
+      select, input, button, img, canvas { max-width: 100%; }
+      .row .label { flex: 1 1 auto; }
+      .row .value, .row .pill { flex: 0 0 auto; text-align: right; }
+      @media (max-width: 400px) {
+        body { padding: 10px; }
+        .card { padding: 12px; }
+      }
     </style>
   </head>
   <body>
@@ -89,12 +106,37 @@ void handleRoot() {
         <div class="bar" id="pwmBar" style="display:none;"><div class="bar-fill" id="pwmFill" style="width:0%;"></div></div>
         <div class="row" id="pwmRow" style="display:none;"><span class="label">PWM</span><span class="value" id="pwmValue">0%</span></div>
         <div class="row"><span class="label">Engine</span><span class="pill" id="engineStatus">--</span></div>
+        <div class="row" id="overvoltageRow" style="display:none;"><span class="label">⚠️ Overvoltage cutoff</span><span class="pill pill-bad">ACTIVE</span></div>
+      </div>
+
+      <div class="card">
+        <h2>System</h2>
+        <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
+        <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
+        <div class="row"><span class="label">Loop time (peak)</span><span class="value" id="loopTime">--</span></div>
+        <div class="row"><span class="label">Refresh rate</span>
+          <span><select id="pollInterval" onchange="setPollInterval()">
+            <option value="1000">1s</option>
+            <option value="2000">2s</option>
+            <option value="5000">5s</option>
+            <option value="10000">10s</option>
+            <option value="30000">30s</option>
+          </select></span>
+        </div>
+        <button class="secondary" onclick="restartDevice()">Restart device</button>
       </div>
 
       <div class="card">
         <h2>Connectivity</h2>
         <div class="row"><span class="label">WiFi</span><span class="pill" id="wifiMode">--</span></div>
         <div class="note">Home Assistant/MQTT only reachable while on home WiFi (STA); AP fallback is offline-only.</div>
+      </div>
+
+      <div class="card">
+        <h2>MQTT / Home Assistant</h2>
+        <div class="row"><span class="label">Status</span><span class="pill" id="mqttStatus">--</span></div>
+        <div class="row"><span class="label">Last sent</span><span class="value" id="mqttLastSent">--</span></div>
+        <button onclick="testMqtt()">Test connection</button>
       </div>
 
       <div class="card">
@@ -150,7 +192,9 @@ void handleRoot() {
       const WIFI_CLASSES = { sta: 'pill-good', connecting: 'pill-warn', ap_fallback: 'pill-warn' };
 
       const Components = {
-        engineStatus: running => ({ text: running ? 'RUNNING' : 'STOPPED', cls: running ? 'pill-good' : 'pill-bad' }),
+        engineStatus: (running, probing) => probing
+          ? { text: 'PROBING', cls: 'pill-warn' }
+          : { text: running ? 'RUNNING' : 'STOPPED', cls: running ? 'pill-good' : 'pill-bad' },
         wifiMode: mode => ({ text: WIFI_LABELS[mode] || mode, cls: WIFI_CLASSES[mode] || 'pill-warn' }),
         autotuneStatus: active => ({ text: active ? 'running' : 'idle', cls: active ? 'pill-warn' : 'pill-good' }),
         maintenanceDue: due => ({ text: due ? 'DUE' : 'OK', cls: due ? 'pill-bad' : 'pill-good' }),
@@ -176,11 +220,30 @@ void handleRoot() {
           document.getElementById('pwmFill').style.width = Fmt.percent(data.pwmPercentage);
         }
 
-        setPill('engineStatus', Components.engineStatus(data.engineRunning));
+        setPill('engineStatus', Components.engineStatus(data.engineRunning, data.engineProbing));
+        document.getElementById('overvoltageRow').style.display = data.overvoltageAlert ? 'flex' : 'none';
       }
 
       function updateConnectivity(data) {
         setPill('wifiMode', Components.wifiMode(data.wifiMode));
+      }
+
+      function updateMqtt(data) {
+        setPill('mqttStatus', data.mqttConnected
+          ? { text: 'connected', cls: 'pill-good' } : { text: 'disconnected', cls: 'pill-bad' });
+        setText('mqttLastSent', data.mqttHasLastPublish
+          ? Fmt.volts(data.mqttLastVoltage) + ', ' + data.mqttLastPwmPercent + '% PWM (' + data.mqttLastSentAgoS + 's ago)'
+          : 'never');
+      }
+
+      async function testMqtt() {
+        await fetch('/mqtt/test');
+        setTimeout(fetchData, 500);
+      }
+
+      async function restartDevice() {
+        if (!confirm('Restart the device now?')) return;
+        await fetch('/restart');
       }
 
       function updateAutotune(data) {
@@ -198,11 +261,21 @@ void handleRoot() {
         setPill('maintenanceDue', Components.maintenanceDue(data.maintenanceDue));
       }
 
+      const TOTAL_HEAP_BYTES = 81920; // ESP8266 total RAM
+      function updateSystem(data) {
+        const usedPct = (TOTAL_HEAP_BYTES - data.freeHeap) / TOTAL_HEAP_BYTES * 100;
+        document.getElementById('heapFill').style.width = usedPct.toFixed(0) + '%';
+        setText('heapValue', usedPct.toFixed(0) + '% (' + (data.freeHeap / 1024).toFixed(1) + ' KB free)');
+        setText('loopTime', (data.loopTimeUs / 1000).toFixed(1) + ' ms');
+      }
+
       function updateStatus(data) {
         updateChargingStatus(data);
         updateConnectivity(data);
         updateAutotune(data);
         updateMaintenance(data);
+        updateSystem(data);
+        updateMqtt(data);
       }
 
       // Self-contained line chart, no external libraries (must work fully offline in AP mode).
@@ -256,7 +329,7 @@ void handleRoot() {
           ? { text: 'on', cls: 'pill-good' } : { text: 'off', cls: 'pill-bad' });
         document.getElementById('gpsToggleBtn').textContent = data.active ? 'Disable' : 'Enable';
         document.getElementById('gpsLink').innerHTML = data.active
-          ? ` <a href="https://${location.hostname}:443/">Open GPS page &rarr;</a>` : '';
+          ? ` <a href="https://${location.hostname}:443/gps">Open GPS page &rarr;</a>` : '';
       }
 
       async function fetchData() {
@@ -290,7 +363,15 @@ void handleRoot() {
         fetchData();
       }
 
-      setInterval(fetchData, 5000);
+      let pollTimer = null;
+      function setPollInterval() {
+        const ms = Number(document.getElementById('pollInterval').value);
+        localStorage.setItem('kubotio_poll_ms', ms);
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(fetchData, ms);
+      }
+      document.getElementById('pollInterval').value = localStorage.getItem('kubotio_poll_ms') || '5000';
+      setPollInterval();
       window.addEventListener('resize', fetchData);
       fetchData();
     </script>
@@ -303,16 +384,14 @@ void handleRoot() {
 
 void handleData() {
   DynamicJsonDocument doc(512);
-  doc["voltage"] = history[(historyIndex + 119) % 120].voltage;
+  doc["voltage"] = history[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE].voltage;
   doc["outputMode"] = alternator.isPWMEnabled() ? "pwm" : "relay";
   doc["pwmPercentage"] = alternator.getPWMPercent();
   doc["engineRunning"] = engine_running;
+  doc["engineProbing"] = engine_probing;
+  doc["overvoltageAlert"] = overvoltage_alert;
 
-  switch (wifiManager.mode()) {
-    case WifiMode::CONNECTED_STA: doc["wifiMode"] = "sta"; break;
-    case WifiMode::AP_FALLBACK: doc["wifiMode"] = "ap_fallback"; break;
-    default: doc["wifiMode"] = "connecting"; break;
-  }
+  doc["wifiMode"] = wifiConnectedSta ? "sta" : "ap_fallback";
 
   doc["autotuneActive"] = autotuneActive;
   doc["runHours"] = usageCounters.totalRunSeconds() / 3600.0;
@@ -320,6 +399,24 @@ void handleData() {
   doc["serviceIntervalHours"] = usageCounters.serviceIntervalHours();
   doc["maintenanceDue"] = usageCounters.isMaintenanceDue();
   doc["bootCount"] = usageCounters.bootCount();
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["resetReason"] = ESP.getResetReason();
+  doc["resetInfo"] = ESP.getResetInfo();
+  doc["wifiModeRaw"] = (int)WiFi.getMode();
+  doc["softApIp"] = WiFi.softAPIP().toString();
+  doc["softApStations"] = WiFi.softAPgetStationNum();
+  doc["maxFreeBlock"] = ESP.getMaxFreeBlockSize();
+  doc["heapFrag"] = ESP.getHeapFragmentation();
+  doc["loopTimeUs"] = maxLoopDurationUs;
+
+  doc["mqttConnected"] = mqttPublisher.isConnected();
+  doc["mqttHasLastPublish"] = mqttPublisher.hasLastPublished();
+  if (mqttPublisher.hasLastPublished()) {
+    const MqttReading& last = mqttPublisher.lastPublished();
+    doc["mqttLastVoltage"] = last.voltage;
+    doc["mqttLastPwmPercent"] = alternator.getMaxPWM() ? (last.pwmValue * 100 / alternator.getMaxPWM()) : 0;
+    doc["mqttLastSentAgoS"] = (millis() - mqttPublisher.lastPublishMillis()) / 1000;
+  }
 
   String json;
   serializeJson(doc, json);
@@ -330,8 +427,8 @@ void handleHistory() {
   DynamicJsonDocument doc(4096);
   JsonArray array = doc.to<JsonArray>();
 
-  for(int i = 0; i < 120; i++) {
-    int idx = (historyIndex + i) % 120;
+  for(int i = 0; i < HISTORY_SIZE; i++) {
+    int idx = (historyIndex + i) % HISTORY_SIZE;
     if(history[idx].timestamp == 0) continue;
 
     JsonObject point = array.createNestedObject();
@@ -473,6 +570,11 @@ void handleMaintenanceLogAdd() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+void handleMqttTest() {
+  mqttPublisher.forceReconnectNow();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handleGpsEnable() {
   gps_https_start();
   server.send(200, "application/json", "{\"ok\":true}");
@@ -480,10 +582,22 @@ void handleGpsEnable() {
 
 void handleGpsDisable() {
   gps_https_stop();
+  if (server.hasArg("redirect")) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleGpsStatus() {
   String json = String("{\"active\":") + (gps_https_active() ? "true" : "false") + "}";
   server.send(200, "application/json", json);
+}
+
+void handleRestart() {
+  server.send(200, "application/json", "{\"ok\":true}");
+  server.client().flush();
+  delay(100); // let the response actually go out before rebooting
+  ESP.restart();
 }

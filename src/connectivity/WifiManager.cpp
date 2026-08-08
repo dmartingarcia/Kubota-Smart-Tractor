@@ -1,4 +1,5 @@
 #include "WifiManager.h"
+#include <Arduino.h>
 
 WifiManager::WifiManager(IWifiDriver& driver,
                           const char* staSsid, const char* staPassword,
@@ -17,13 +18,15 @@ void WifiManager::startSTA(unsigned long currentMillis) {
 }
 
 void WifiManager::begin(unsigned long currentMillis) {
-  if (staSsid_ == nullptr || staSsid_[0] == '\0') {
-    driver_.beginAP(apSsid_, apPassword_);
-    mode_ = WifiMode::AP_FALLBACK;
-    nextApRetry_ = currentMillis + apRetryIntervalMs_;
-    return;
-  }
-  startSTA(currentMillis);
+  // AP comes up first, unconditionally, and stays up (exclusive WIFI_AP mode) until
+  // the next scheduled STA retry: the device is reachable via AP from the very first
+  // second of boot regardless of whether home WiFi is reachable. STA and AP are
+  // mutually exclusive on this radio (WIFI_AP_STA concurrency left the AP invisible),
+  // so a STA attempt briefly takes the AP down and beginAP() brings it back after.
+  driver_.beginAP(apSsid_, apPassword_);
+  Serial.println("AP up");
+  mode_ = WifiMode::AP_FALLBACK;
+  nextApRetry_ = currentMillis + apRetryIntervalMs_;
 }
 
 void WifiManager::update(unsigned long currentMillis) {
@@ -32,10 +35,13 @@ void WifiManager::update(unsigned long currentMillis) {
       StaLinkStatus status = driver_.staStatus();
       if (status == StaLinkStatus::CONNECTED) {
         mode_ = WifiMode::CONNECTED_STA;
+        Serial.println("STA connected");
       } else if (currentMillis - staDeadline_ < (1UL << 31)) { // deadline reached (non-wrapping compare)
-        driver_.beginAP(apSsid_, apPassword_);
+        driver_.stopSTA();
+        driver_.beginAP(apSsid_, apPassword_); // restore AP: STA attempt used it exclusively
         mode_ = WifiMode::AP_FALLBACK;
         nextApRetry_ = currentMillis + apRetryIntervalMs_;
+        Serial.println("STA connection failed, staying on AP");
       }
       break;
     }

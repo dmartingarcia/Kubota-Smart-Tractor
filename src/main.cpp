@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include "secrets.h"
@@ -8,9 +9,9 @@
 #include "charging/output_component.h"
 #include "charging/VoltageSensor.h"
 #include "charging/AlternatorLogic.h"
-#include "connectivity/WifiManager.h"
-#include "connectivity/Esp8266WifiDriver.h"
+#include "charging/EngineDetector.h"
 #include "charging/PidAutotuner.h"
+#include "charging/RealTimePid.h"
 #include "storage/UsageCounters.h"
 #include "storage/LittleFsStore.h"
 #include "storage/MaintenanceLog.h"
@@ -18,7 +19,6 @@
 #include "connectivity/MqttPublisher.h"
 #include "connectivity/PubSubMqttTransport.h"
 #include "web/HttpsGpsServer.h"
-#include <PID_v1.h>
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -30,17 +30,81 @@ extern const uint16_t mqtt_port;
 extern const char* mqtt_user;
 extern const char* mqtt_password;
 
-#define STA_CONNECT_TIMEOUT_MS   15000  // give up on home WiFi and fall back to AP after this
-#define AP_RETRY_INTERVAL_MS     60000  // while in AP fallback, retry home WiFi this often
+// Plain ESP8266 WiFi handling, no abstraction layer. Exclusive AP/STA (not AP_STA
+// concurrent - that looked fine at first but proved unreliable across reboots on
+// this hardware: the SDK reported success but the AP silently stopped broadcasting).
+// The AP is up by default and stays up; a STA attempt briefly switches away from it,
+// but only when nobody is currently connected to the AP.
+#define STA_CONNECT_TIMEOUT_MS 30000  // give up on home WiFi and go back to AP after this
+#define STA_RETRY_INTERVAL_MS  120000 // if not connected to home WiFi, retry this often
 
-Esp8266WifiDriver wifiDriver;
-WifiManager wifiManager(wifiDriver, sta_ssid, sta_password, ap_ssid, ap_password,
-                         STA_CONNECT_TIMEOUT_MS, AP_RETRY_INTERVAL_MS);
+bool wifiConnectedSta = false;
+bool staAttemptInProgress = false;
+unsigned long staAttemptDeadline = 0;
+unsigned long nextStaAttempt = 0;
+
+// Captive portal: redirects any DNS lookup from an AP client back to our own IP, so
+// the phone's connectivity probe fails/redirects and it auto-shows the sign-in page.
+DNSServer dnsServer;
+const IPAddress apIP(192, 168, 4, 1);
+
+void startAP() {
+  WiFi.persistent(false);
+  WiFi.disconnect(true);
+  bool modeOk = WiFi.mode(WIFI_AP);
+  IPAddress gateway = apIP;
+  IPAddress subnet(255, 255, 255, 0);
+  bool cfgOk = WiFi.softAPConfig(apIP, gateway, subnet);
+  bool apOk = WiFi.softAP(ap_ssid, ap_password);
+  dnsServer.start(53, "*", apIP);
+  Serial.printf("AP up: mode=%d cfg=%d ap=%d ip=%s heap=%u\n",
+                modeOk, cfgOk, apOk, WiFi.softAPIP().toString().c_str(), ESP.getFreeHeap());
+}
+
+void updateWifi(unsigned long currentMillis) {
+  if (staAttemptInProgress) {
+    if (WiFi.status() == WL_CONNECTED) {
+      staAttemptInProgress = false;
+      wifiConnectedSta = true;
+      Serial.println("STA connected");
+    } else if (currentMillis - staAttemptDeadline < (1UL << 31)) { // deadline reached (non-wrapping compare)
+      staAttemptInProgress = false;
+      startAP(); // STA attempt used the radio exclusively - bring the AP back
+      nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS;
+      Serial.println("STA connection failed, back to AP");
+    }
+    return;
+  }
+
+  if (wifiConnectedSta) {
+    if (WiFi.status() != WL_CONNECTED) {
+      wifiConnectedSta = false;
+      startAP();
+      nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS;
+      Serial.println("STA dropped, back to AP");
+    }
+    return;
+  }
+
+  // Sitting on AP only: consider retrying STA, but never interrupt someone actively
+  // using the AP just to try the periodic reconnect.
+  if (sta_ssid[0] != '\0' && currentMillis - nextStaAttempt < (1UL << 31)) {
+    if (WiFi.softAPgetStationNum() > 0) {
+      nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS; // postpone, AP is in use
+      return;
+    }
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(sta_ssid, sta_password);
+    staAttemptInProgress = true;
+    staAttemptDeadline = currentMillis + STA_CONNECT_TIMEOUT_MS;
+    Serial.println("Trying STA...");
+  }
+}
 
 // Configuration
 #define CALIBRATION_IN_VOLTAGE        15.25
 #define CALIBRATION_A0_VOLTAGE        2.90
-#define VOLTAGE_THRESHOLD_HIGH        14.6
+#define VOLTAGE_THRESHOLD_HIGH        14.4
 #define VOLTAGE_THRESHOLD_LOW         13.0
 #define INPUT_VOLTAGE                 A0
 #define SAMPLES                       5
@@ -50,12 +114,15 @@ WifiManager wifiManager(wifiDriver, sta_ssid, sta_password, ap_ssid, ap_password
 #define ALTERNATOR_ACTIVE_STATE       HIGH
 #define USE_PWM                       true
 #define MAX_CHARGE_CURRENT_PWM        1024
+#define ENGINE_PROBE_PULSE_MS         2000  // hold full output this long before checking for a voltage rise
+#define ENGINE_PROBE_COOLDOWN_MS      60000 // wait this long before the next pulse if the engine looks off
+#define ENGINE_PROBE_RISE_VOLTS       0.3   // minimum voltage rise during a pulse to call the engine running
 
 // PID Configuration
 #define PID_SAMPLE_TIME       20   // ms
 double pidInput, pidOutput;
 double Setpoint=140.0, Kp=30, Ki=3, Kd=1;
-PID chargePID(&pidInput, &pidOutput, &Setpoint, Kp, Ki, Kd, DIRECT);
+RealTimePid chargePID(Kp, Ki, Kd, 0, MAX_CHARGE_CURRENT_PWM);
 
 // Relay-feedback autotune: swings output +-25% of full scale around mid-scale,
 // noiseBand 0.2V (Setpoint is voltage*10), 6 half-cycles (~3 periods), 3min cap.
@@ -88,16 +155,30 @@ MaintenanceLog maintenanceLog(maintenanceLogStore);
 PubSubMqttTransport mqttTransport(mqtt_host, mqtt_port, "smarttractor", mqtt_user, mqtt_password);
 MqttPublisher mqttPublisher(mqttTransport, 20, 30000); // 20 readings buffered, retry every 30s
 
+#define MQTT_PUBLISH_INTERVAL_MS 15000 // matches PubSubClient's default 15s keepalive
+unsigned long lastMqttPublish = 0;
+
 // Global state
 OutputComponent alternator(RELAY_PIN, USE_PWM, ALTERNATOR_ACTIVE_STATE);
-DataPoint history[120];
+EngineDetector engineDetector(ENGINE_PROBE_PULSE_MS, ENGINE_PROBE_COOLDOWN_MS, ENGINE_PROBE_RISE_VOLTS);
+DataPoint history[HISTORY_SIZE];
 byte historyIndex = 0;
 bool connected = false;
 static bool last_state = false;
 unsigned long next_relay_check = 0;
 static unsigned long lastPidUpdate = 0;
+static unsigned long lastVoltageRead = 0;
 float current_voltage = 0.0;
-bool engine_running = false; // TODO: determine engine state from the voltage increment when enabling alternator
+bool engine_running = false; // updated each manage_alternator() cycle
+bool engine_probing = false; // true while a MAX_CHARGE probe pulse has no verdict yet
+// Latched alert: set immediately on overvoltage, stays true for OVERVOLTAGE_ALERT_HOLD_MS
+// after the LAST time it triggered (refreshed every cycle while still active) so a brief
+// spike survives long enough to actually get picked up by the next MQTT publish, instead
+// of clearing before anyone ever sees it.
+#define OVERVOLTAGE_ALERT_HOLD_MS 60000
+bool overvoltage_alert = false;
+unsigned long overvoltageAlertMillis = 0;
+unsigned long maxLoopDurationUs = 0; // high-water mark, reset every store_data() cycle
 
 void setup() {
   Serial.begin(115200);
@@ -113,20 +194,13 @@ void setup() {
   delay(5000);
 
 
-  // Initialize PID
-  if(USE_PWM) {
-    chargePID.SetMode(AUTOMATIC);
-    chargePID.SetSampleTime(PID_SAMPLE_TIME);
-    chargePID.SetOutputLimits(0, MAX_CHARGE_CURRENT_PWM);
-  }
-
-  // WiFi: try home network (STA) first, non-blocking; falls back to AP if it can't connect.
-  // Web server/OTA are started once here since ESP8266WebServer/ArduinoOTA work over
-  // whichever WiFi interface (STA or AP) ends up active.
+  // WiFi: AP up first (always reachable), STA attempted alongside it. Web server/OTA
+  // started here since they just work over whichever WiFi interface is active.
+  startAP();
+  nextStaAttempt = millis();
   ArduinoOTA.setHostname("smarttractor");
   ArduinoOTA.begin();
   setupWebServer();
-  wifiManager.begin(millis());
   usageCounters.begin(millis());
 
   // Best-effort NTP sync (non-blocking): only resolves once/if STA has internet.
@@ -153,23 +227,44 @@ float read_voltage() {
 int lastTargetPWM = 0;
 
 void manage_alternator() {
+  if(overvoltage_alert && millis() - overvoltageAlertMillis >= OVERVOLTAGE_ALERT_HOLD_MS) {
+    overvoltage_alert = false; // condition cleared and MQTT has had time to pick it up
+  }
+
   if(USE_PWM) {
     // PID-based control, on a short/stable cadence regardless of what else runs in loop()
     if(should_run_cycle(millis(), lastPidUpdate, PID_SAMPLE_TIME)) {
       pidInput = current_voltage * 10;
       lastPidUpdate = millis();
-      if(!autotuneActive) chargePID.Compute();
+      if(!autotuneActive) pidOutput = chargePID.compute(Setpoint, pidInput, millis());
 
       switch(decide_pwm_safety_action(current_voltage, VOLTAGE_THRESHOLD_HIGH, VOLTAGE_THRESHOLD_LOW)) {
         case ChargeAction::OFF:
           alternator.off();
           lastTargetPWM = 0;
+          engineDetector.reset();
+          engine_running = true; // voltage this high means something is charging it
+          engine_probing = false;
+          overvoltage_alert = true;
+          overvoltageAlertMillis = millis(); // refreshed every cycle while still active
           break;
         case ChargeAction::MAX_CHARGE:
-          alternator.pwm(MAX_CHARGE_CURRENT_PWM);
-          lastTargetPWM = MAX_CHARGE_CURRENT_PWM;
+          // Voltage this low is also where a resting, engine-off battery sits, so don't just
+          // hold the field coil at 100% and drain it further — probe with pulses instead.
+          if(engineDetector.update(current_voltage, millis())) {
+            alternator.pwm(MAX_CHARGE_CURRENT_PWM);
+            lastTargetPWM = MAX_CHARGE_CURRENT_PWM;
+          } else {
+            alternator.off();
+            lastTargetPWM = 0;
+          }
+          engine_running = engineDetector.engineRunning();
+          engine_probing = engineDetector.isProbing();
           break;
         case ChargeAction::RUN_PID: {
+          engineDetector.reset();
+          engine_running = true; // alternator has already raised voltage out of the probe zone
+          engine_probing = false;
           if(autotuneActive) {
             double out = pidAutotuner.update(pidInput, millis());
             int targetPWM = constrain(static_cast<int>(out), 0, MAX_CHARGE_CURRENT_PWM);
@@ -178,7 +273,7 @@ void manage_alternator() {
 
             if(pidAutotuner.state() == AutotuneState::SUCCEEDED) {
               AutotuneGains g = pidAutotuner.gains();
-              chargePID.SetTunings(g.kp, g.ki, g.kd);
+              chargePID.setTunings(g.kp, g.ki, g.kd);
               Serial.printf("Autotune done: Kp=%.2f Ki=%.2f Kd=%.2f (Ku=%.2f Pu=%.0fms)\n",
                             g.kp, g.ki, g.kd, g.ku, g.pu);
               autotuneActive = false;
@@ -207,6 +302,8 @@ void manage_alternator() {
       if(last_state) alternator.set(true);
       else alternator.off();
     }
+    engine_running = alternator.isActive();
+    engine_probing = false;
   }
 }
 
@@ -219,7 +316,7 @@ void store_data() {
     alternator.getPWM(),  // Store PWM value
   };
 
-  historyIndex = (historyIndex + 1) % 120;
+  historyIndex = (historyIndex + 1) % HISTORY_SIZE;
 
   Serial.printf("Current Voltage: %.2fV\n", current_voltage);
   Serial.printf("Alternator State: %s\n", alternator.isActive() ? "ON" : "OFF");
@@ -227,36 +324,54 @@ void store_data() {
   Serial.printf("Relay State: %s\n", last_state ? "ON" : "OFF");
   Serial.printf("Next Relay Check: %lu\n", next_relay_check);
   Serial.printf("History Index: %d\n", historyIndex);
-  Serial.printf("Connected: %s\n", connected ? "Yes" : "No");
+  if (connected) {
+    Serial.printf("Connected: Yes (%s)\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("Connected: No");
+  }
+  Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
+  Serial.printf("Max loop time: %lu us\n", maxLoopDurationUs);
+  maxLoopDurationUs = 0;
   Serial.println();
 }
 
 unsigned long lastDataStore = 0;
 
 void loop() {
+  unsigned long loopStartUs = micros();
   unsigned long currentMillis = millis();
-  current_voltage = read_voltage();
+  if(should_run_cycle(currentMillis, lastVoltageRead, PID_SAMPLE_TIME)) {
+    current_voltage = read_voltage();
+    lastVoltageRead = currentMillis;
+  }
 
-  // Non-blocking: just polls state/kicks off connects, never waits.
-  wifiManager.update(currentMillis);
-  connected = (wifiManager.mode() == WifiMode::CONNECTED_STA);
+  updateWifi(currentMillis);
+  connected = wifiConnectedSta;
+  dnsServer.processNextRequest();
 
   ArduinoOTA.handle();
   server.handleClient();
   gps_https_handle_client(); // no-op unless GPS mode was enabled from the dashboard
 
   manage_alternator();
-  usageCounters.tick(alternator.isActive(), currentMillis);
+  usageCounters.tick(engine_running, currentMillis);
 
-  // Data storage + MQTT publish (5000ms interval, not every fast PID cycle)
+  // Data storage (5000ms interval, not every fast PID cycle)
   if(currentMillis - lastDataStore >= 5000) {
     store_data();
     lastDataStore = currentMillis;
-
-    if(mqtt_host[0] != '\0') {
-      MqttReading reading{currentMillis, current_voltage, alternator.getPWM(), alternator.isActive(),
-                          engine_running, usageCounters.totalRunSeconds(), usageCounters.isMaintenanceDue()};
-      mqttPublisher.update(wifiManager.mode() == WifiMode::CONNECTED_STA, reading, currentMillis);
-    }
   }
+
+  // MQTT publish on its own cadence, matching the broker keepalive so the periodic
+  // publish itself keeps the connection alive (no separate ping traffic needed).
+  if(mqtt_host[0] != '\0' && currentMillis - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {
+    lastMqttPublish = currentMillis;
+    MqttReading reading{currentMillis, current_voltage, alternator.getPWM(), alternator.isActive(),
+                        engine_running, usageCounters.totalRunSeconds(), usageCounters.isMaintenanceDue(),
+                        ESP.getFreeHeap(), overvoltage_alert};
+    mqttPublisher.update(wifiConnectedSta, reading, currentMillis);
+  }
+
+  unsigned long loopDurationUs = micros() - loopStartUs;
+  if (loopDurationUs > maxLoopDurationUs) maxLoopDurationUs = loopDurationUs;
 }

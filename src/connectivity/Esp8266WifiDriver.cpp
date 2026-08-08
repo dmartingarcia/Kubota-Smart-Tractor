@@ -19,10 +19,18 @@ StaLinkStatus Esp8266WifiDriver::staStatus() {
 }
 
 void Esp8266WifiDriver::beginAP(const char* ssid, const char* password) {
+  // Exclusive AP mode, matching the bare-metal test that's confirmed to broadcast
+  // on this hardware. WIFI_AP_STA concurrency was tried and left the AP invisible.
+  WiFi.persistent(false);
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_AP);
   IPAddress local_IP(192, 168, 4, 1);
   IPAddress gateway(192, 168, 4, 1);
   IPAddress subnet(255, 255, 255, 0);
   WiFi.softAPConfig(local_IP, gateway, subnet);
   WiFi.softAP(ssid, password);
+}
+
+void Esp8266WifiDriver::stopSTA() {
+  WiFi.disconnect();
 }
