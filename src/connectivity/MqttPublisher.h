@@ -23,6 +23,8 @@ struct MqttReading {
   bool engineRunning;
   uint32_t totalRunSeconds;
   bool maintenanceDue;
+  uint32_t freeHeap;
+  bool overvoltageAlert;
 };
 
 // Publishes telemetry to MQTT/Home Assistant, buffering readings while offline
@@ -32,7 +34,7 @@ struct MqttReading {
 // since IMqttTransport::connect() can block briefly on a real socket.
 class MqttPublisher {
   public:
-    static constexpr size_t kMaxBuffered = 40;
+    static constexpr size_t kMaxBuffered = 20; // matches the capacity main.cpp actually passes
 
     MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, unsigned long reconnectIntervalMs);
 
@@ -40,6 +42,15 @@ class MqttPublisher {
 
     size_t bufferedCount() const;
     int publishCount() const; // total successful publish() calls, for tests/diagnostics
+    bool isConnected(); // wraps transport_.connected(), for dashboard/diagnostics
+
+    bool hasLastPublished() const { return hasLastPublished_; }
+    const MqttReading& lastPublished() const { return lastPublished_; }
+    unsigned long lastPublishMillis() const { return lastPublishMillis_; }
+
+    // Bypasses the reconnect throttle so the next update() retries immediately -
+    // for a dashboard "test connection now" button.
+    void forceReconnectNow();
 
   private:
     IMqttTransport& transport_;
@@ -52,10 +63,13 @@ class MqttPublisher {
     unsigned long lastConnectAttempt_;
     bool discoveryPublished_;
     int publishCount_;
+    MqttReading lastPublished_;
+    bool hasLastPublished_;
+    unsigned long lastPublishMillis_;
 
     void enqueue(const MqttReading& r);
-    void flushBuffer();
-    void publishReading(const MqttReading& r);
+    void flushBuffer(unsigned long currentMillis);
+    void publishReading(const MqttReading& r, unsigned long currentMillis);
     void publishDiscovery();
 };
 

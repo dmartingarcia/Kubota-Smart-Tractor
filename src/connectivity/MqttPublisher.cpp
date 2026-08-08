@@ -12,7 +12,8 @@ MqttPublisher::MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, u
     reconnectIntervalMs_(reconnectIntervalMs),
     bufferHead_(0), bufferCount_(0),
     lastConnectAttempt_(0 - reconnectIntervalMs), // wraps so the first update() attempts a connect immediately
-    discoveryPublished_(false), publishCount_(0) {}
+    discoveryPublished_(false), publishCount_(0), lastPublished_{},
+    hasLastPublished_(false), lastPublishMillis_(0) {}
 
 void MqttPublisher::enqueue(const MqttReading& r) {
   if (bufferCount_ < bufferCapacity_) {
@@ -25,24 +26,29 @@ void MqttPublisher::enqueue(const MqttReading& r) {
   }
 }
 
-void MqttPublisher::flushBuffer() {
+void MqttPublisher::flushBuffer(unsigned long currentMillis) {
   while (bufferCount_ > 0) {
-    publishReading(buffer_[bufferHead_]);
+    publishReading(buffer_[bufferHead_], currentMillis);
     bufferHead_ = (bufferHead_ + 1) % bufferCapacity_;
     bufferCount_--;
   }
 }
 
-void MqttPublisher::publishReading(const MqttReading& r) {
-  char payload[192];
+void MqttPublisher::publishReading(const MqttReading& r, unsigned long currentMillis) {
+  char payload[256];
   snprintf(payload, sizeof(payload),
            "{\"timestamp\":%lu,\"voltage\":%.2f,\"pwm\":%u,\"active\":%s,"
-           "\"engineRunning\":%s,\"runHours\":%.1f,\"maintenanceDue\":%s}",
+           "\"engineRunning\":%s,\"runHours\":%.1f,\"maintenanceDue\":%s,\"freeHeap\":%lu,"
+           "\"overvoltageAlert\":%s}",
            r.timestamp, r.voltage, r.pwmValue, r.active ? "true" : "false",
            r.engineRunning ? "true" : "false", r.totalRunSeconds / 3600.0,
-           r.maintenanceDue ? "true" : "false");
+           r.maintenanceDue ? "true" : "false", static_cast<unsigned long>(r.freeHeap),
+           r.overvoltageAlert ? "true" : "false");
   if (transport_.publish(kStateTopic, payload, false)) {
     publishCount_++;
+    lastPublished_ = r;
+    hasLastPublished_ = true;
+    lastPublishMillis_ = currentMillis;
   }
 }
 
@@ -63,6 +69,14 @@ void MqttPublisher::publishDiscovery() {
     "{\"name\":\"Tractor Maintenance Due\",\"state_topic\":\"kubotio/tractor/state\","
     "\"value_template\":\"{{ value_json.maintenanceDue }}\",\"payload_on\":true,\"payload_off\":false,"
     "\"device_class\":\"problem\",\"unique_id\":\"kubotio_maintenance_due\"}", true);
+  transport_.publish("homeassistant/sensor/kubotio_free_heap/config",
+    "{\"name\":\"Tractor Free Heap\",\"state_topic\":\"kubotio/tractor/state\","
+    "\"value_template\":\"{{ value_json.freeHeap }}\",\"unit_of_measurement\":\"B\","
+    "\"entity_category\":\"diagnostic\",\"unique_id\":\"kubotio_free_heap\"}", true);
+  transport_.publish("homeassistant/binary_sensor/kubotio_overvoltage/config",
+    "{\"name\":\"Tractor Overvoltage Alert\",\"state_topic\":\"kubotio/tractor/state\","
+    "\"value_template\":\"{{ value_json.overvoltageAlert }}\",\"payload_on\":true,\"payload_off\":false,"
+    "\"device_class\":\"safety\",\"unique_id\":\"kubotio_overvoltage\"}", true);
 }
 
 void MqttPublisher::update(bool networkAvailable, const MqttReading& latest, unsigned long currentMillis) {
@@ -88,9 +102,11 @@ void MqttPublisher::update(bool networkAvailable, const MqttReading& latest, uns
     publishDiscovery();
     discoveryPublished_ = true;
   }
-  flushBuffer();
-  publishReading(latest);
+  flushBuffer(currentMillis);
+  publishReading(latest, currentMillis);
 }
 
 size_t MqttPublisher::bufferedCount() const { return bufferCount_; }
 int MqttPublisher::publishCount() const { return publishCount_; }
+bool MqttPublisher::isConnected() { return transport_.connected(); }
+void MqttPublisher::forceReconnectNow() { lastConnectAttempt_ = 0 - reconnectIntervalMs_; }
