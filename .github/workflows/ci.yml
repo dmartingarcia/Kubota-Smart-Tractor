@@ -99,8 +99,5 @@ jobs:
       - name: Use placeholder secrets (compile-check only, no real credentials)
         run: cp src/secrets.h.tpl src/secrets.h
 
-      - name: Generate placeholder GPS HTTPS cert (compile-check only, gitignored)
-        run: ./scripts/generate_gps_cert.sh
-
       - name: Build firmware
         run: pio run -e d1_mini
