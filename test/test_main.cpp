@@ -358,13 +358,15 @@ class FakeMqttTransport : public IMqttTransport {
 };
 
 MqttReading make_reading(unsigned long ts) {
-    return MqttReading{ts, 14.2f, 500, true, false, 3600, false};
+    // timestamp, voltage, pwmValue, pwmPercent, active, engineRunning, totalRunSeconds, maintenanceDue
+    return MqttReading{ts, 14.2f, 500, 49, true, false, 3600, false};
 }
 
 void test_mqtt_buffers_when_network_unavailable() {
     FakeMqttTransport t;
     MqttPublisher pub(t, 5, 30000);
-    pub.update(false, make_reading(1000), 1000);
+    pub.recordSample(make_reading(1000));
+    pub.update(false, 1000);
     TEST_ASSERT_EQUAL(0, t.connectCalls);
     TEST_ASSERT_EQUAL(0, t.publishCalls);
     TEST_ASSERT_EQUAL(1, static_cast<int>(pub.bufferedCount()));
@@ -374,37 +376,39 @@ void test_mqtt_throttles_reconnect_attempts() {
     FakeMqttTransport t;
     t.connectResult = false; // always fails
     MqttPublisher pub(t, 5, 30000);
-    pub.update(true, make_reading(0), 0);       // first call -> attempts immediately
+    pub.update(true, 0);       // first call -> attempts immediately
     TEST_ASSERT_EQUAL(1, t.connectCalls);
-    pub.update(true, make_reading(10000), 10000); // within interval -> no retry
+    pub.update(true, 10000); // within interval -> no retry
     TEST_ASSERT_EQUAL(1, t.connectCalls);
-    pub.update(true, make_reading(31000), 31000); // past interval -> retries
+    pub.update(true, 31000); // past interval -> retries
     TEST_ASSERT_EQUAL(2, t.connectCalls);
 }
 
 void test_mqtt_flushes_buffer_and_publishes_on_reconnect() {
     FakeMqttTransport t;
     MqttPublisher pub(t, 5, 30000);
-    pub.update(true, make_reading(0), 0); // not connected: buffers + triggers successful connect
+    pub.recordSample(make_reading(0));
+    pub.update(true, 0); // not connected: triggers successful connect, doesn't publish yet
     TEST_ASSERT_EQUAL(1, static_cast<int>(pub.bufferedCount()));
     TEST_ASSERT_EQUAL(0, pub.publishCount());
 
-    pub.update(true, make_reading(100), 100); // now connected: discovery + flush(1) + latest(1)
+    pub.update(true, 100); // now connected: discovery + batch(1)
     TEST_ASSERT_EQUAL(0, static_cast<int>(pub.bufferedCount()));
-    TEST_ASSERT_EQUAL(2, pub.publishCount());
-    TEST_ASSERT_EQUAL(6, t.publishCalls); // 4 discovery configs + 2 state publishes
+    TEST_ASSERT_EQUAL(1, pub.publishCount());
+    TEST_ASSERT_EQUAL(7, t.publishCalls); // 6 discovery configs + 1 batch publish
 
-    pub.update(true, make_reading(200), 200); // already connected, discovery not repeated
-    TEST_ASSERT_EQUAL(3, pub.publishCount());
-    TEST_ASSERT_EQUAL(7, t.publishCalls);
+    pub.recordSample(make_reading(200));
+    pub.update(true, 200); // already connected, discovery not repeated
+    TEST_ASSERT_EQUAL(2, pub.publishCount());
+    TEST_ASSERT_EQUAL(8, t.publishCalls);
 }
 
 void test_mqtt_buffer_drops_oldest_when_full() {
     FakeMqttTransport t;
     MqttPublisher pub(t, 2, 30000); // capacity 2
-    pub.update(false, make_reading(1), 1);
-    pub.update(false, make_reading(2), 2);
-    pub.update(false, make_reading(3), 3); // drops reading #1
+    pub.recordSample(make_reading(1));
+    pub.recordSample(make_reading(2));
+    pub.recordSample(make_reading(3)); // drops reading #1
     TEST_ASSERT_EQUAL(2, static_cast<int>(pub.bufferedCount()));
 }
 

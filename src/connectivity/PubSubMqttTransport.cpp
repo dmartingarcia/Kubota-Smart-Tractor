@@ -5,6 +5,7 @@ PubSubMqttTransport::PubSubMqttTransport(const char* host, uint16_t port, const 
   : mqttClient_(wifiClient_), clientId_(clientId), user_(user), password_(password) {
   mqttClient_.setServer(host, port);
   mqttClient_.setSocketTimeout(1); // seconds - bounds worst-case blocking on connect()/publish()
+  mqttClient_.setBufferSize(2200); // batched publishes (MqttPublisher::kMaxPerBatch) need more than the 256B default
 }
 
 bool PubSubMqttTransport::connected() {

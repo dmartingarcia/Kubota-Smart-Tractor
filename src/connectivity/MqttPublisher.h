@@ -18,7 +18,8 @@ class IMqttTransport {
 struct MqttReading {
   unsigned long timestamp;
   float voltage;
-  uint16_t pwmValue;
+  uint16_t pwmValue;    // raw 0-maxPWM count
+  uint8_t pwmPercent;   // 0-100, for display (HA etc.) - pwmValue alone isn't a percentage
   bool active;
   bool engineRunning;
   uint32_t totalRunSeconds;
@@ -27,21 +28,32 @@ struct MqttReading {
   bool overvoltageAlert;
 };
 
-// Publishes telemetry to MQTT/Home Assistant, buffering readings while offline
-// (no WiFi STA / broker unreachable) and flushing them once connectivity is back
-// (store-and-forward). Publishes HA MQTT discovery configs once per (re)connect.
+// Publishes telemetry to MQTT/Home Assistant. Sampling and publishing are decoupled
+// on purpose: recordSample() buffers a reading (call it often, e.g. every 10s, for
+// good resolution even while offline), update() attempts to actually send whatever's
+// buffered as a single batched JSON array (call it less often, e.g. every 30s, so a
+// healthy connection isn't spammed with one MQTT message per sample). Buffers while
+// offline/disconnected and sends the backlog once connectivity is back
+// (store-and-forward), capped at kMaxPerBatch readings per publish() call so one
+// message can't balloon after a long outage - the rest just waits for the next
+// update() call. Publishes HA MQTT discovery configs once per (re)connect.
 // update() must stay cheap: reconnect attempts are throttled to reconnectIntervalMs,
 // since IMqttTransport::connect() can block briefly on a real socket.
 class MqttPublisher {
   public:
-    static constexpr size_t kMaxBuffered = 20; // matches the capacity main.cpp actually passes
+    static constexpr size_t kMaxBuffered = 180; // matches the capacity main.cpp actually passes
+    static constexpr size_t kMaxPerBatch = 10; // bounds a single publish() payload's size
 
     MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, unsigned long reconnectIntervalMs);
 
-    void update(bool networkAvailable, const MqttReading& latest, unsigned long currentMillis);
+    void recordSample(const MqttReading& reading); // always buffers; call at the fast/sample cadence
+
+    // Call at the slower publish cadence: connects if needed (throttled), and if
+    // connected, publishes up to kMaxPerBatch buffered readings as one batch.
+    void update(bool networkAvailable, unsigned long currentMillis);
 
     size_t bufferedCount() const;
-    int publishCount() const; // total successful publish() calls, for tests/diagnostics
+    int publishCount() const; // total individual readings successfully published, for tests/diagnostics
     bool isConnected(); // wraps transport_.connected(), for dashboard/diagnostics
 
     bool hasLastPublished() const { return hasLastPublished_; }
@@ -68,8 +80,7 @@ class MqttPublisher {
     unsigned long lastPublishMillis_;
 
     void enqueue(const MqttReading& r);
-    void flushBuffer(unsigned long currentMillis);
-    void publishReading(const MqttReading& r, unsigned long currentMillis);
+    void publishBatch(unsigned long currentMillis);
     void publishDiscovery();
 };
 

@@ -4,6 +4,21 @@
 
 namespace {
 constexpr const char* kStateTopic = "kubotio/tractor/state";
+
+// One reading as a JSON object, written at buf+offset. Returns the new offset, or
+// the old offset unchanged if it didn't fit (caller stops appending in that case).
+size_t appendReadingJson(char* buf, size_t bufSize, size_t offset, const MqttReading& r) {
+  int written = snprintf(buf + offset, bufSize - offset,
+           "{\"timestamp\":%lu,\"voltage\":%.2f,\"pwm\":%u,\"pwmPercent\":%u,\"active\":%s,"
+           "\"engineRunning\":%s,\"runHours\":%.1f,\"maintenanceDue\":%s,\"freeHeap\":%lu,"
+           "\"overvoltageAlert\":%s}",
+           r.timestamp, r.voltage, r.pwmValue, r.pwmPercent, r.active ? "true" : "false",
+           r.engineRunning ? "true" : "false", r.totalRunSeconds / 3600.0,
+           r.maintenanceDue ? "true" : "false", static_cast<unsigned long>(r.freeHeap),
+           r.overvoltageAlert ? "true" : "false");
+  if (written < 0 || static_cast<size_t>(written) >= bufSize - offset) return offset; // didn't fit
+  return offset + static_cast<size_t>(written);
+}
 }
 
 MqttPublisher::MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, unsigned long reconnectIntervalMs)
@@ -26,69 +41,67 @@ void MqttPublisher::enqueue(const MqttReading& r) {
   }
 }
 
-void MqttPublisher::flushBuffer(unsigned long currentMillis) {
-  while (bufferCount_ > 0) {
-    publishReading(buffer_[bufferHead_], currentMillis);
-    bufferHead_ = (bufferHead_ + 1) % bufferCapacity_;
-    bufferCount_--;
-  }
-}
-
-void MqttPublisher::publishReading(const MqttReading& r, unsigned long currentMillis) {
-  char payload[256];
-  snprintf(payload, sizeof(payload),
-           "{\"timestamp\":%lu,\"voltage\":%.2f,\"pwm\":%u,\"active\":%s,"
-           "\"engineRunning\":%s,\"runHours\":%.1f,\"maintenanceDue\":%s,\"freeHeap\":%lu,"
-           "\"overvoltageAlert\":%s}",
-           r.timestamp, r.voltage, r.pwmValue, r.active ? "true" : "false",
-           r.engineRunning ? "true" : "false", r.totalRunSeconds / 3600.0,
-           r.maintenanceDue ? "true" : "false", static_cast<unsigned long>(r.freeHeap),
-           r.overvoltageAlert ? "true" : "false");
-  if (transport_.publish(kStateTopic, payload, false)) {
-    publishCount_++;
-    lastPublished_ = r;
-    hasLastPublished_ = true;
-    lastPublishMillis_ = currentMillis;
-  }
+void MqttPublisher::recordSample(const MqttReading& reading) {
+  enqueue(reading);
 }
 
 void MqttPublisher::publishDiscovery() {
   transport_.publish("homeassistant/sensor/kubotio_voltage/config",
     "{\"name\":\"Tractor Battery Voltage\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.voltage }}\",\"unit_of_measurement\":\"V\","
+    "\"value_template\":\"{{ value_json[-1].voltage }}\",\"unit_of_measurement\":\"V\","
     "\"unique_id\":\"kubotio_voltage\"}", true);
   transport_.publish("homeassistant/sensor/kubotio_pwm/config",
     "{\"name\":\"Tractor Charge PWM\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.pwm }}\",\"unit_of_measurement\":\"%\","
+    "\"value_template\":\"{{ value_json[-1].pwmPercent }}\",\"unit_of_measurement\":\"%\","
     "\"unique_id\":\"kubotio_pwm\"}", true);
   transport_.publish("homeassistant/sensor/kubotio_run_hours/config",
     "{\"name\":\"Tractor Charging Hours\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.runHours }}\",\"unit_of_measurement\":\"h\","
+    "\"value_template\":\"{{ value_json[-1].runHours }}\",\"unit_of_measurement\":\"h\","
     "\"unique_id\":\"kubotio_run_hours\"}", true);
   transport_.publish("homeassistant/binary_sensor/kubotio_maintenance_due/config",
     "{\"name\":\"Tractor Maintenance Due\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.maintenanceDue }}\",\"payload_on\":true,\"payload_off\":false,"
+    "\"value_template\":\"{{ value_json[-1].maintenanceDue }}\",\"payload_on\":true,\"payload_off\":false,"
     "\"device_class\":\"problem\",\"unique_id\":\"kubotio_maintenance_due\"}", true);
   transport_.publish("homeassistant/sensor/kubotio_free_heap/config",
     "{\"name\":\"Tractor Free Heap\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.freeHeap }}\",\"unit_of_measurement\":\"B\","
+    "\"value_template\":\"{{ value_json[-1].freeHeap }}\",\"unit_of_measurement\":\"B\","
     "\"entity_category\":\"diagnostic\",\"unique_id\":\"kubotio_free_heap\"}", true);
   transport_.publish("homeassistant/binary_sensor/kubotio_overvoltage/config",
     "{\"name\":\"Tractor Overvoltage Alert\",\"state_topic\":\"kubotio/tractor/state\","
-    "\"value_template\":\"{{ value_json.overvoltageAlert }}\",\"payload_on\":true,\"payload_off\":false,"
+    "\"value_template\":\"{{ value_json[-1].overvoltageAlert }}\",\"payload_on\":true,\"payload_off\":false,"
     "\"device_class\":\"safety\",\"unique_id\":\"kubotio_overvoltage\"}", true);
 }
 
-void MqttPublisher::update(bool networkAvailable, const MqttReading& latest, unsigned long currentMillis) {
-  transport_.loop();
+void MqttPublisher::publishBatch(unsigned long currentMillis) {
+  size_t batchSize = bufferCount_ < kMaxPerBatch ? bufferCount_ : kMaxPerBatch;
+  if (batchSize == 0) return;
 
-  if (!networkAvailable) {
-    enqueue(latest);
-    return;
+  char payload[kMaxPerBatch * 200 + 8];
+  size_t offset = 0;
+  payload[offset++] = '[';
+  for (size_t i = 0; i < batchSize; i++) {
+    if (i > 0) payload[offset++] = ',';
+    offset = appendReadingJson(payload, sizeof(payload), offset, buffer_[(bufferHead_ + i) % bufferCapacity_]);
   }
+  payload[offset++] = ']';
+  payload[offset] = '\0';
+
+  if (transport_.publish(kStateTopic, payload, false)) {
+    publishCount_ += static_cast<int>(batchSize);
+    lastPublished_ = buffer_[(bufferHead_ + batchSize - 1) % bufferCapacity_];
+    hasLastPublished_ = true;
+    lastPublishMillis_ = currentMillis;
+    bufferHead_ = (bufferHead_ + batchSize) % bufferCapacity_;
+    bufferCount_ -= batchSize;
+  }
+}
+
+void MqttPublisher::update(bool networkAvailable, unsigned long currentMillis) {
+  // transport_.loop() (keepalive) is pumped directly by the caller every loop()
+  // iteration now, independent of this slower publish cadence.
+  if (!networkAvailable) return; // recordSample() already buffered whatever came in
 
   if (!transport_.connected()) {
-    enqueue(latest);
     if (should_run_cycle(currentMillis, lastConnectAttempt_, reconnectIntervalMs_)) {
       lastConnectAttempt_ = currentMillis;
       if (transport_.connect()) {
@@ -102,8 +115,7 @@ void MqttPublisher::update(bool networkAvailable, const MqttReading& latest, uns
     publishDiscovery();
     discoveryPublished_ = true;
   }
-  flushBuffer(currentMillis);
-  publishReading(latest, currentMillis);
+  publishBatch(currentMillis);
 }
 
 size_t MqttPublisher::bufferedCount() const { return bufferCount_; }
