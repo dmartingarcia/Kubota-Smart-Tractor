@@ -7,6 +7,7 @@
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
+#include "../src/gps/GpsJumpFilter.h"
 #include <string.h>
 
 void setUp() {}
@@ -412,6 +413,37 @@ void test_mqtt_buffer_drops_oldest_when_full() {
     TEST_ASSERT_EQUAL(2, static_cast<int>(pub.bufferedCount()));
 }
 
+void test_gps_jump_filter_accepts_first_fix() {
+    GpsJumpFilter f(60.0, 3);
+    TEST_ASSERT_TRUE(f.accept(0.0, 0.0, 1000));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, f.lastLat());
+}
+
+void test_gps_jump_filter_accepts_plausible_movement() {
+    GpsJumpFilter f(60.0, 3);
+    f.accept(0.0, 0.0, 0);
+    // ~11m over 5s = ~8km/h, well under the 60km/h cap
+    TEST_ASSERT_TRUE(f.accept(0.0, 0.0001, 5000));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0001, f.lastLon());
+}
+
+void test_gps_jump_filter_rejects_impossible_jump() {
+    GpsJumpFilter f(60.0, 3);
+    f.accept(0.0, 0.0, 0);
+    // ~111km in 1s - no tractor does that
+    TEST_ASSERT_FALSE(f.accept(1.0, 0.0, 1000));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, f.lastLat()); // reference point unchanged
+}
+
+void test_gps_jump_filter_resyncs_after_consecutive_rejects() {
+    GpsJumpFilter f(60.0, 2); // resync after 2 rejects
+    f.accept(0.0, 0.0, 0);
+    TEST_ASSERT_FALSE(f.accept(1.0, 0.0, 1000)); // reject 1
+    TEST_ASSERT_FALSE(f.accept(1.0, 0.0, 2000)); // reject 2
+    TEST_ASSERT_TRUE(f.accept(1.0, 0.0, 3000));  // resync: accepted unconditionally
+    TEST_ASSERT_EQUAL_DOUBLE(1.0, f.lastLat());
+}
+
 void test_sanitize_note_escapes_commas_and_newlines() {
     char out[40];
     sanitize_note("Oil change, filter\nreplaced", out, sizeof(out));
@@ -491,6 +523,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_mqtt_throttles_reconnect_attempts);
     RUN_TEST(test_mqtt_flushes_buffer_and_publishes_on_reconnect);
     RUN_TEST(test_mqtt_buffer_drops_oldest_when_full);
+    RUN_TEST(test_gps_jump_filter_accepts_first_fix);
+    RUN_TEST(test_gps_jump_filter_accepts_plausible_movement);
+    RUN_TEST(test_gps_jump_filter_rejects_impossible_jump);
+    RUN_TEST(test_gps_jump_filter_resyncs_after_consecutive_rejects);
     RUN_TEST(test_sanitize_note_escapes_commas_and_newlines);
     RUN_TEST(test_sanitize_note_truncates_to_buffer);
     RUN_TEST(test_maintenance_log_add_and_read_roundtrip);
