@@ -6,24 +6,34 @@
 ESP8266-based intelligent charging system with adaptive PID control and web monitoring. Maintains optimal battery health using advanced charge management.
 
 ## Features ✨
-- 🎮 **Adaptive PID Control** - Maintains precise voltage regulation, with one-shot
+- 🎮 **Real-time-aware PID Control** - Maintains precise voltage regulation, scaled by
+  actual elapsed time between cycles (not an assumed fixed sample time), with one-shot
   **relay-feedback autotune** to derive Kp/Ki/Kd automatically
 - ⚡ **Dual Output Modes** - Relay or PWM MOSFET control (configurable)
-- 📶 **WiFi STA + AP fallback** - Tries the home network first (non-blocking), falls
-  back to a local AP if it can't connect; retries STA periodically in the background
-- 🏠 **Home Assistant via MQTT** - Publishes telemetry + HA MQTT discovery configs;
-  buffers readings while offline and flushes them once connectivity is back
-- 🌐 **Web Dashboard** - Real-time monitoring, historical chart (no external
-  dependencies - works fully offline in AP mode), autotune trigger, WiFi/MQTT status
+- 📶 **Exclusive AP/STA WiFi** - The AP is up by default and always reachable; a STA
+  attempt briefly takes the radio and falls back to AP on failure/drop. The periodic
+  STA retry never interrupts someone actively connected to the AP. Captive portal
+  (auto-redirects AP clients to the dashboard) and a `/restart` endpoint + dashboard
+  button for remote recovery without USB access
+- 🏠 **Home Assistant via MQTT** - Samples telemetry every 10s, publishes in batches
+  every 30s (buffers up to 30 minutes of samples while offline/disconnected and sends
+  the backlog as soon as connectivity is back); HA MQTT discovery configs published on
+  (re)connect; dashboard "test connection" button
+- 🌐 **Web Dashboard** - Real-time monitoring, historical voltage chart (no external
+  dependencies - works fully offline in AP mode), autotune trigger, WiFi/MQTT status,
+  RAM/loop-time diagnostics, configurable refresh rate
 - 🛠️ **Maintenance Logbook** - Charging-hours + power-on counters and a resettable
   service-interval counter, plus a logbook page to record maintenance events, all
   persisted to flash
-- 🛰️ **GPS Tracking** - On-demand HTTPS page (needed for browser Geolocation): live
-  speed, track recording with GPX export, straight-line (AB) driving guidance
+- 🛰️ **GPS (optional hardware)** - Reads a serial NMEA GPS module directly (no phone/
+  browser involved); dashboard only ever shows a GPS card once the module has a valid
+  fix - gracefully absent if it's not wired up
 - 🔄 **OTA Updates** - Wireless firmware upgrades
-- 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status
-- 🔒 **Safety envelope** - Over-voltage cutoff always enforced, including during
-  autotune (see [Safety Systems](#safety-systems-️))
+- 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status (including a
+  distinct "PROBING" state while testing for a running engine)
+- 🔒 **Safety envelope** - Over-voltage cutoff (14.4V) always enforced, including during
+  autotune, with a 60s-latched dashboard/MQTT alert so a brief spike doesn't go
+  unnoticed (see [Safety Systems](#safety-systems-️))
 
 ## Hardware Requirements 🔨
 | Component              | Specification                           |
@@ -46,7 +56,7 @@ Relay COM → Alternator Field Circuit
 
 Battery+ → MOSFET Source → Alternator Field
 
-MOSFET Gate → PWM Pin (D1)
+MOSFET Gate → PWM Pin (D3, `RELAY_PIN` in `main.cpp` - same pin drives the relay or the MOSFET depending on `USE_PWM`)
 
 MOSFET Drain → GND (with heatsink)
 
@@ -82,8 +92,8 @@ MOSFET Drain → GND (with heatsink)
 2. Configure operation mode in `src/main.cpp`:
    ```cpp
    #define USE_PWM true      // false for relay mode
-   #define OUTPUT_PIN D1     // PWM-capable pin
-   #define PID_SETPOINT 14.6 // Optimal charging voltage
+   #define RELAY_PIN D3      // drives the relay or the MOSFET gate, depending on USE_PWM
+   double Setpoint = 140.0;  // target charge voltage * 10 (140.0 = 14.0V)
    ```
 
 ## Calibration Guide 🔧
@@ -97,9 +107,12 @@ MOSFET Drain → GND (with heatsink)
    ```
 
 ### PID Tuning Procedure
+`chargePID` is a `RealTimePid` (see [`src/charging/RealTimePid.h`](src/charging/RealTimePid.h)) - a
+standard PID scaled by the *actual* elapsed time between `compute()` calls (derivative-on-
+measurement, integral clamped to the output range for anti-windup), not the `PID_v1` library.
 1. **Initial Setup** (P-only control):
    ```cpp
-   PID chargePID(&pidInput, &pidOutput, &pidSetpoint, 80.0, 0, 0, DIRECT);
+   RealTimePid chargePID(80.0, 0, 0, 0, MAX_CHARGE_CURRENT_PWM);
    ```
 2. **Tuning Steps**:
    - Increase P until system oscillates, then reduce by 50%
@@ -107,8 +120,10 @@ MOSFET Drain → GND (with heatsink)
    - Add Derivative control (start with 0.01*P)
 3. **Example Safe Values**:
    ```cpp
-   PID chargePID(&pidInput, &pidOutput, &pidSetpoint, 80.0, 5.0, 0.5, DIRECT);
+   RealTimePid chargePID(80.0, 5.0, 0.5, 0, MAX_CHARGE_CURRENT_PWM);
    ```
+   Or skip manual tuning entirely and use the dashboard's one-shot autotune trigger
+   (relay-feedback / Åström–Hägglund, see `PidAutotuner`).
 
 ## Testing 🧪
 All non-trivial logic is split from hardware access behind small interfaces (a HAL),
@@ -119,16 +134,18 @@ pio test -e native
 | Module | What it covers |
 |---|---|
 | `VoltageSensor` / `AlternatorLogic` | Calibration math, safety thresholds, relay hysteresis, PID cycle scheduling |
-| `WifiManager` (+ `IWifiDriver`) | STA/AP fallback state machine, against a fake driver |
+| `RealTimePid` | Elapsed-time-scaled PID math, anti-windup clamping |
+| `EngineDetector` | Probe-pulse engine detection state machine (probing/running/stopped) |
 | `PidAutotuner` | Relay-feedback autotune math (Ku/Pu → Kp/Ki/Kd) |
 | `UsageCounters` (+ `IFlashStore`) | Charging-hours/boot-count accumulation, throttled saves, against an in-memory fake |
-| `MqttPublisher` (+ `IMqttTransport`) | Offline buffering/flush, HA discovery, reconnect throttling, against a fake transport |
+| `MqttPublisher` (+ `IMqttTransport`) | Sample/publish decoupling, batched payloads, offline buffering/flush, HA discovery, reconnect throttling, against a fake transport |
 | `MaintenanceLog` (+ `IMaintenanceLogStore`) | Note sanitization, log round-trip, against a fake store |
+| `WifiManager` (+ `IWifiDriver`) | STA/AP fallback state machine, against a fake driver - **no longer used by `main.cpp`** (which now does plain exclusive AP/STA directly), kept only because it's still covered here |
 
 `main.cpp` wires these pure/HAL-backed decisions into the real hardware calls (PID,
-PWM, relay, WiFi, flash, MQTT). When touching any of this behavior, add/extend a
-native test first (TDD) — the real hardware implementations (`Esp8266WifiDriver`,
-`LittleFsStore`, `PubSubMqttTransport`, `LittleFsMaintenanceLogStore`) are thin and
+PWM, relay, WiFi, flash, MQTT, GPS). When touching any of this behavior, add/extend a
+native test first (TDD) — the real hardware implementations (`LittleFsStore`,
+`PubSubMqttTransport`, `LittleFsMaintenanceLogStore`, `GpsReader`) are thin and
 intentionally left untested here (no board attached to CI/dev machine); verify them
 on real hardware after native tests pass.
 
@@ -153,78 +170,66 @@ plain `<canvas>`, no CDN) so it renders correctly even fully offline in AP mode.
 
 **Dashboard (`/`):**
 - Real-time voltage chart (last ~10min of history)
-- PWM%/Relay status, engine status
-- WiFi mode (home network vs. AP fallback) and what that means for HA/MQTT reachability
+- PWM%/Relay status, engine status (RUNNING/PROBING/STOPPED)
+- WiFi mode (home network vs. AP) and what that means for HA/MQTT reachability
 - PID autotune trigger + status
 - Charging hours, power-on count, maintenance due indicator, service interval editor
+- MQTT status + last-published reading + "test connection" button
+- GPS card (hidden until the module has a fix - see [GPS](#gps-optional-hardware-))
+- RAM used / peak loop time, configurable refresh rate, "restart device" button
 
 **Maintenance logbook (`/maintenance`):**
 - Table of logged maintenance events (date - if NTP has synced, otherwise "unknown
   date" - hours at time of service, free-text note)
 - Form to log a new entry
 
-## GPS Tracking 🛰️
-Browsers only allow the Geolocation API in a "secure context" (HTTPS, or
-`localhost`) - they block it outright on a plain-HTTP LAN IP like the dashboard's,
-even fully offline in AP mode. To make GPS features possible at all, there's a
-second, separate HTTPS server (self-signed cert, port 443) that only runs the GPS
-page - it's started/stopped on demand from the dashboard's "GPS Mode" toggle, so its
-RAM/TLS cost is only paid while actually using it, not for the whole time the tractor
-is charging.
+## GPS (optional hardware) 🛰️
+A serial NMEA GPS module wires directly to the ESP8266 - no browser, no HTTPS, no
+per-phone permission prompt, works even with nobody's phone in range.
 
-**Setup:**
-```bash
-./scripts/generate_gps_cert.sh   # once per checkout/device; writes src/web/GpsHttpsCert.h (gitignored)
-```
-Without this, the firmware still builds and runs fine - GPS mode just isn't usable
-until the cert exists.
+**Wiring:** a u-blox NEO-6M/NEO-M8N-class module (or anything else that speaks NMEA
+over UART), via `SoftwareSerial`:
+| ESP8266 pin | GPIO | Wire to |
+|---|---|---|
+| D5 | GPIO14 | GPS module TX (ESP8266 RX) |
+| D6 | GPIO12 | GPS module RX (ESP8266 TX - only needed to send the module commands) |
 
-**Using it:** enable "GPS Mode" on the dashboard, then open the HTTPS link it shows.
-The browser will warn the certificate isn't trusted (expected - it's self-signed,
-there's no CA reachable for a LAN-only device); accept it once per device. From there:
-- Live speed and GPS accuracy
-- Start/stop track recording, stored in the browser's IndexedDB (not on the device);
-  download any recorded track as a `.gpx` file, or delete it
-- Straight-line (AB-line) driving guidance: mark point A, drive, mark point B, and a
-  bar shows how far off that line you are as you go
+Neither pin is a boot-strapping pin, so no conflict with normal startup (unlike D3/D4,
+already used for the relay/LED - see [`GpsReader.h`](src/gps/GpsReader.h) for the full
+pin rationale). Baud rate defaults to 9600 (`GPS_BAUD` in `main.cpp`), the standard for
+these modules.
 
-**Known limitations:**
-- The self-signed cert is generated once per checkout and baked into the firmware; it
-  is *not* unique per physical device unless you re-run the script per device you flash.
-  It exists only to satisfy the browser's secure-context check, not to protect anything
-  sensitive on this LAN-only server.
-- TLS handshakes are RAM-hungry on an ESP8266. This was only verified to *compile* and
-  report a plausible RAM/flash footprint (see below); it has not been exercised on real
-  hardware this session (no board attached). If it turns out to be too tight alongside
-  WiFi/MQTT/the main dashboard, the on-demand start/stop design at least means it can
-  only affect things while GPS mode is actively toggled on.
-- `ESP8266WebServerSecure` supports one simultaneous client - fine for a single phone.
+**Availability, not assumed:** `GpsReader` exposes two independent signals -
+`isConnected()` (the module is physically present and sending *something*, fix or not)
+and `hasFix()` (a recent, valid location - safe to actually display/use). The dashboard's
+GPS card stays hidden until `hasFix()` is true; nothing GPS-related is shown until
+there's real data to show. A cold GPS fix can take 30s to a few minutes outdoors.
 
-**Parcel &amp; coverage:** on the same GPS page, enter a Spanish cadastral reference
-(*referencia catastral*) to fetch the field's boundary from Sede del Catastro's public
-INSPIRE WFS and an aerial photo background from IGN's PNOA WMS - both free, no API
-key, fetched directly from the phone's browser (needs internet, so do this on home
-WiFi). The boundary and photo are cached in `localStorage` for offline reuse afterward.
-Set a working width and, as you drive with GPS enabled, it fills in a coverage grid
-(cell size = working width) over the field and shows % covered. Verified working
-end-to-end against a real parcel this session.
+**Not implemented:** on-device track recording/storage (plan: buffer points on LittleFS,
+forward to a small backend once connectivity allows, mirroring the MQTT store-and-forward
+pattern - see [Roadmap](#roadmap-)) and heading (no magnetometer/IMU - no feature needs
+it yet).
 
 ## Home Assistant / MQTT 🏠
-- On boot, the device tries the home WiFi (`sta_ssid`) first; if it can't connect
-  within ~15s it falls back to its own AP, and keeps retrying the home network in the
-  background every ~60s. WiFi connects are non-blocking so the PID loop's cadence
-  never stalls waiting on a handshake.
-- MQTT/Home Assistant is only reachable while on the home network - the AP fallback is
-  offline-only by design (it's meant for direct access when there's no home WiFi in range).
+- WiFi is exclusive AP/STA (see [Features](#features-)) - MQTT is only reachable
+  while a STA connection is up; it's offline-only while sitting on the AP.
 - Set `mqtt_host` in `secrets.h` to enable; leave it empty to disable MQTT entirely.
-- Readings are buffered in RAM (up to 20) while offline/disconnected and flushed to the
-  broker once reconnected, so brief outages don't lose data. HA MQTT discovery configs
-  are published on (re)connect, so entities show up automatically (voltage, PWM%,
-  charging hours, maintenance-due).
+- **Sampling and publishing are decoupled:** a reading is sampled (buffered) every
+  10s (`MQTT_SAMPLE_INTERVAL_MS`) regardless of connectivity, giving good resolution
+  even while offline; the buffer is actually sent every 30s (`MQTT_PUBLISH_INTERVAL_MS`),
+  as one batched JSON array (capped at 10 readings per MQTT message -
+  `MqttPublisher::kMaxPerBatch` - so a long outage's backlog drains over a few publish
+  cycles instead of one huge message). Buffer holds up to 30 minutes of samples
+  (`MqttPublisher::kMaxBuffered = 180`).
+- HA MQTT discovery configs are published on (re)connect (voltage, PWM%, charging
+  hours, maintenance-due, free heap, overvoltage alert). Since the state payload is
+  now an array, templates read the last element: `{{ value_json[-1].voltage }}`.
+- Dashboard has a "test connection" button (`/mqtt/test`, forces an immediate
+  reconnect attempt) and shows the last-published reading + how long ago.
 - **Known limitation:** the underlying MQTT client's `connect()` can still block
   briefly on an unreachable broker; it's throttled to at most once per ~30s and its
   socket timeout is capped at 1s to bound the worst case, but it isn't fully
-  non-blocking like the WiFi manager. Acceptable given the cadence, but worth knowing.
+  non-blocking. Acceptable given the cadence, but worth knowing.
 
 ## System Indicators 💡
 The status LED tracks PID output brightness while in PWM mode (dim = low charge
@@ -252,11 +257,14 @@ Use the web dashboard for WiFi/mode status instead.
 | Overheating MOSFET     | Add heatsink & verify current |
 
 ## Safety Systems ⚠️
-- **Implemented today**: hard cutoff at `VOLTAGE_THRESHOLD_HIGH` (14.6V by default) -
-  the alternator is forced off above this regardless of PID/autotune output
-  (`decide_pwm_safety_action` in `AlternatorLogic`, covered by native tests). Autotune
-  swings output but is still subject to this same cutoff every cycle, never bypasses it.
-- **Not implemented yet** (aspirational, don't rely on these): PWM rate limiting,
+- **Implemented**: hard cutoff at `VOLTAGE_THRESHOLD_HIGH` (14.4V) - the alternator is
+  forced off above this regardless of PID/autotune output (`decide_pwm_safety_action`
+  in `AlternatorLogic`, covered by native tests). Autotune swings output but is still
+  subject to this same cutoff every cycle, never bypasses it. The alert latches for
+  60s (`OVERVOLTAGE_ALERT_HOLD_MS`) after the last trigger, shown on the dashboard and
+  published via MQTT/HA, so a brief spike doesn't go unnoticed even if it clears before
+  the next publish cycle.
+- **Not implemented** (aspirational, don't rely on these): PWM rate limiting,
   thermal shutdown (no temperature sensor wired up), watchdog timer. Treat the
   hardware notes below as mandatory regardless.
 
@@ -279,16 +287,18 @@ Use the web dashboard for WiFi/mode status instead.
   most) - flash wear is a non-issue here regardless of the counters' cadence above.
 
 ## Roadmap 🗺️
-- **MQTT `connect()` blocking caveat** - see [Home Assistant / MQTT](#home-assistant--mqtt-) above; a
-  fully non-blocking MQTT client would need a custom async TCP state machine.
-- **Engine-vs-charging detection** - `engine_running` is currently always `false`
-  (see the `TODO` in `main.cpp`); usage-hour tracking currently uses
-  *alternator-active* time as a proxy, which is reasonable but not identical to engine
-  runtime.
-- Real-hardware validation of WiFi STA/AP fallback, MQTT, LittleFS persistence, and
-  the GPS HTTPS server - everything above is native-unit-tested and compiles for
-  `d1_mini`, but hasn't been run on an actual board this session (none attached to the
-  dev machine). The HTTPS/TLS RAM footprint is the one most worth checking first.
+- **MQTT `connect()` blocking caveat** - see [Home Assistant / MQTT](#home-assistant--mqtt-)
+  above; a fully non-blocking MQTT client would need a custom async TCP state machine.
+- **GPS track storage** - no on-device recording yet. Plan: buffer points on LittleFS,
+  forward to a small backend (Ruby, under consideration) once STA connectivity is up,
+  same store-and-forward shape as `MqttPublisher`.
+- **Heading** - no magnetometer/IMU. Only worth adding once a concrete feature needs
+  it (e.g. straight-line driving guidance).
+- **Heap fragmentation over long uptime** - `ESP.getHeapFragmentation()` can climb
+  high enough after many hours of runtime to break the dashboard even with healthy
+  total free heap (largest contiguous block is the real constraint). `/restart` +
+  the dashboard button work around it; an automatic periodic restart is a candidate
+  fix, not yet implemented.
 ## License 📄
 MIT License - See [LICENSE](LICENSE) for details
 *PID Library:* BSD 3-Clause (included in dependencies)
