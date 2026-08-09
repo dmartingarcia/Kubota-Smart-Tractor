@@ -2,7 +2,7 @@
 #include <ArduinoJson.h>
 #include "../charging/output_component.h"
 #include "../connectivity/MqttPublisher.h"
-#include "HttpsGpsServer.h"
+#include "../gps/GpsReader.h"
 #include <time.h>
 
 namespace {
@@ -27,6 +27,7 @@ extern bool wifiConnectedSta;
 extern unsigned long maxLoopDurationUs;
 extern MqttPublisher mqttPublisher;
 extern const char* mqtt_host;
+extern GpsReader gpsReader;
 bool web_initialized = false;
 
 void setupWebServer() {
@@ -40,9 +41,6 @@ void setupWebServer() {
     server.on("/maintenance", handleMaintenancePage);
     server.on("/maintenance/log", handleMaintenanceLogList);
     server.on("/maintenance/log/add", handleMaintenanceLogAdd);
-    server.on("/gps/enable", handleGpsEnable);
-    server.on("/gps/disable", handleGpsDisable);
-    server.on("/gps/status", handleGpsStatus);
     server.on("/restart", handleRestart); // remote recovery when there's no physical/USB access
     server.on("/mqtt/test", handleMqttTest);
     server.onNotFound(handleRoot); // captive portal: any unknown host/path -> dashboard
@@ -132,6 +130,12 @@ void handleRoot() {
         <div class="note">Home Assistant/MQTT only reachable while on home WiFi (STA); AP fallback is offline-only.</div>
       </div>
 
+      <div class="card" id="gpsCard" style="display:none;">
+        <h2>GPS</h2>
+        <div class="row"><span class="label">Position</span><span class="value" id="gpsPosition">--</span></div>
+        <div class="row"><span class="label">Speed</span><span class="value" id="gpsSpeed">--</span></div>
+      </div>
+
       <div class="card">
         <h2>MQTT / Home Assistant</h2>
         <div class="row"><span class="label">Status</span><span class="pill" id="mqttStatus">--</span></div>
@@ -140,20 +144,9 @@ void handleRoot() {
       </div>
 
       <div class="card">
-        <h2>GPS Mode</h2>
-        <div class="row"><span class="label">Status</span><span class="pill" id="gpsStatus">off</span></div>
-        <button id="gpsToggleBtn" onclick="toggleGps()">Enable</button>
-        <div class="note">
-          Opens a separate HTTPS page (self-signed cert - your browser will warn
-          "not secure", that's expected for a LAN device with no internet CA; accept
-          it once per device) needed for GPS to work at all in the browser.
-          <span id="gpsLink"></span>
-        </div>
-      </div>
-
-      <div class="card">
         <h2>PID Autotune</h2>
         <div class="row"><span class="label">Status</span><span class="pill" id="autotuneStatus">idle</span></div>
+        <div class="row"><span class="label">Kp / Ki / Kd</span><span class="value" id="pidGains">--</span></div>
         <button id="autotuneBtn" onclick="startAutotune()">Start autotune</button>
         <div class="note">Briefly swings charge output to measure the alternator's response and tune the PID automatically.</div>
       </div>
@@ -246,6 +239,14 @@ void handleRoot() {
         await fetch('/restart');
       }
 
+      function updateGps(data) {
+        document.getElementById('gpsCard').style.display = data.gpsHasFix ? 'block' : 'none';
+        if (data.gpsHasFix) {
+          setText('gpsPosition', data.gpsLat.toFixed(5) + ', ' + data.gpsLon.toFixed(5));
+          setText('gpsSpeed', data.gpsSpeedKmh.toFixed(1) + ' km/h');
+        }
+      }
+
       function updateAutotune(data) {
         setPill('autotuneStatus', Components.autotuneStatus(data.autotuneActive));
         document.getElementById('autotuneBtn').disabled = data.autotuneActive;
@@ -276,6 +277,7 @@ void handleRoot() {
         updateMaintenance(data);
         updateSystem(data);
         updateMqtt(data);
+        updateGps(data);
       }
 
       // Self-contained line chart, no external libraries (must work fully offline in AP mode).
@@ -324,29 +326,14 @@ void handleRoot() {
         ctx.fill();
       }
 
-      function updateGps(data) {
-        setPill('gpsStatus', data.active
-          ? { text: 'on', cls: 'pill-good' } : { text: 'off', cls: 'pill-bad' });
-        document.getElementById('gpsToggleBtn').textContent = data.active ? 'Disable' : 'Enable';
-        document.getElementById('gpsLink').innerHTML = data.active
-          ? ` <a href="https://${location.hostname}:443/gps">Open GPS page &rarr;</a>` : '';
-      }
-
       async function fetchData() {
         try {
-          const [statusRes, historyRes, gpsRes] = await Promise.all([fetch('/data'), fetch('/history'), fetch('/gps/status')]);
+          const [statusRes, historyRes] = await Promise.all([fetch('/data'), fetch('/history')]);
           updateStatus(await statusRes.json());
           drawChart(await historyRes.json());
-          updateGps(await gpsRes.json());
         } catch (error) {
           console.error('Update failed:', error);
         }
-      }
-
-      async function toggleGps() {
-        const enabling = document.getElementById('gpsToggleBtn').textContent === 'Enable';
-        await fetch(enabling ? '/gps/enable' : '/gps/disable');
-        fetchData();
       }
 
       async function startAutotune() {
@@ -390,6 +377,13 @@ void handleData() {
   doc["engineRunning"] = engine_running;
   doc["engineProbing"] = engine_probing;
   doc["overvoltageAlert"] = overvoltage_alert;
+  doc["gpsConnected"] = gpsReader.isConnected();
+  doc["gpsHasFix"] = gpsReader.hasFix();
+  if (gpsReader.hasFix()) {
+    doc["gpsLat"] = gpsReader.latitude();
+    doc["gpsLon"] = gpsReader.longitude();
+    doc["gpsSpeedKmh"] = gpsReader.speedKmh();
+  }
 
   doc["wifiMode"] = wifiConnectedSta ? "sta" : "ap_fallback";
 
@@ -573,26 +567,6 @@ void handleMaintenanceLogAdd() {
 void handleMqttTest() {
   mqttPublisher.forceReconnectNow();
   server.send(200, "application/json", "{\"ok\":true}");
-}
-
-void handleGpsEnable() {
-  gps_https_start();
-  server.send(200, "application/json", "{\"ok\":true}");
-}
-
-void handleGpsDisable() {
-  gps_https_stop();
-  if (server.hasArg("redirect")) {
-    server.sendHeader("Location", "/");
-    server.send(302, "text/plain", "");
-    return;
-  }
-  server.send(200, "application/json", "{\"ok\":true}");
-}
-
-void handleGpsStatus() {
-  String json = String("{\"active\":") + (gps_https_active() ? "true" : "false") + "}";
-  server.send(200, "application/json", json);
 }
 
 void handleRestart() {

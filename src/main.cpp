@@ -18,7 +18,7 @@
 #include "storage/LittleFsMaintenanceLogStore.h"
 #include "connectivity/MqttPublisher.h"
 #include "connectivity/PubSubMqttTransport.h"
-#include "web/HttpsGpsServer.h"
+#include "gps/GpsReader.h"
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -110,6 +110,9 @@ void updateWifi(unsigned long currentMillis) {
 #define SAMPLES                       5
 #define LED_PIN                       D4
 #define RELAY_PIN                     D3
+#define GPS_RX_PIN                    D5 // ESP8266 RX, wired to the GPS module's TX
+#define GPS_TX_PIN                    D6 // ESP8266 TX, wired to the GPS module's RX (optional, only needed to send it commands)
+#define GPS_BAUD                      9600
 #define RELAY_ACTIVATION_DELAY        20000
 #define ALTERNATOR_ACTIVE_STATE       HIGH
 #define USE_PWM                       true
@@ -153,10 +156,19 @@ MaintenanceLog maintenanceLog(maintenanceLogStore);
 // MQTT/Home Assistant: only reachable in CONNECTED_STA mode (see loop()). Buffers
 // readings while offline/AP-fallback and flushes them once STA + broker are back.
 PubSubMqttTransport mqttTransport(mqtt_host, mqtt_port, "smarttractor", mqtt_user, mqtt_password);
-MqttPublisher mqttPublisher(mqttTransport, 20, 30000); // 20 readings buffered, retry every 30s
+MqttPublisher mqttPublisher(mqttTransport, 180, 30000); // 30min of samples at MQTT_SAMPLE_INTERVAL_MS, retry every 30s
 
-#define MQTT_PUBLISH_INTERVAL_MS 15000 // matches PubSubClient's default 15s keepalive
+// Sampling (buffer a reading) and publishing (actually send) run on separate cadences:
+// sampling stays fast for good resolution/history even while offline, publishing is
+// slower so a healthy connection doesn't get spammed with one message per sample.
+#define MQTT_SAMPLE_INTERVAL_MS  10000
+#define MQTT_PUBLISH_INTERVAL_MS 30000
+unsigned long lastMqttSample = 0;
 unsigned long lastMqttPublish = 0;
+
+// GPS: optional hardware, gracefully absent if not wired up. isConnected()/hasFix()
+// gate everything - dashboard/MQTT only ever show GPS data once it's actually valid.
+GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 
 // Global state
 OutputComponent alternator(RELAY_PIN, USE_PWM, ALTERNATOR_ACTIVE_STATE);
@@ -179,6 +191,7 @@ bool engine_probing = false; // true while a MAX_CHARGE probe pulse has no verdi
 bool overvoltage_alert = false;
 unsigned long overvoltageAlertMillis = 0;
 unsigned long maxLoopDurationUs = 0; // high-water mark, reset every store_data() cycle
+bool lastEngineRunning = false; // edge-detects engine shutdown to force an immediate save
 
 void setup() {
   Serial.begin(115200);
@@ -202,6 +215,7 @@ void setup() {
   ArduinoOTA.begin();
   setupWebServer();
   usageCounters.begin(millis());
+  gpsReader.begin();
 
   // Best-effort NTP sync (non-blocking): only resolves once/if STA has internet.
   // Maintenance log entries use epochSeconds=0 (shown as "unknown date") until this lands.
@@ -348,13 +362,21 @@ void loop() {
   updateWifi(currentMillis);
   connected = wifiConnectedSta;
   dnsServer.processNextRequest();
+  gpsReader.update();
 
   ArduinoOTA.handle();
   server.handleClient();
-  gps_https_handle_client(); // no-op unless GPS mode was enabled from the dashboard
 
   manage_alternator();
   usageCounters.tick(engine_running, currentMillis);
+
+  // This board only keeps running ~3-4s after the tractor's engine (and its own
+  // power feed) is switched off, so the engine-off edge is the last reliable chance
+  // to persist anything - don't wait for the normal throttled save.
+  if(lastEngineRunning && !engine_running) {
+    usageCounters.forceSave();
+  }
+  lastEngineRunning = engine_running;
 
   // Data storage (5000ms interval, not every fast PID cycle)
   if(currentMillis - lastDataStore >= 5000) {
@@ -362,14 +384,22 @@ void loop() {
     lastDataStore = currentMillis;
   }
 
-  // MQTT publish on its own cadence, matching the broker keepalive so the periodic
-  // publish itself keeps the connection alive (no separate ping traffic needed).
-  if(mqtt_host[0] != '\0' && currentMillis - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {
-    lastMqttPublish = currentMillis;
-    MqttReading reading{currentMillis, current_voltage, alternator.getPWM(), alternator.isActive(),
-                        engine_running, usageCounters.totalRunSeconds(), usageCounters.isMaintenanceDue(),
-                        ESP.getFreeHeap(), overvoltage_alert};
-    mqttPublisher.update(wifiConnectedSta, reading, currentMillis);
+  if(mqtt_host[0] != '\0') {
+    mqttTransport.loop(); // keepalive/ping - needs to run well under the 15s broker keepalive
+                           // regardless of the slower sample/publish cadences below
+
+    if(currentMillis - lastMqttSample >= MQTT_SAMPLE_INTERVAL_MS) {
+      lastMqttSample = currentMillis;
+      MqttReading reading{currentMillis, current_voltage, alternator.getPWM(), alternator.getPWMPercent(),
+                          alternator.isActive(), engine_running, usageCounters.totalRunSeconds(),
+                          usageCounters.isMaintenanceDue(), ESP.getFreeHeap(), overvoltage_alert};
+      mqttPublisher.recordSample(reading);
+    }
+
+    if(currentMillis - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {
+      lastMqttPublish = currentMillis;
+      mqttPublisher.update(wifiConnectedSta, currentMillis);
+    }
   }
 
   unsigned long loopDurationUs = micros() - loopStartUs;

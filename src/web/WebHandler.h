@@ -34,9 +34,6 @@ void handleMaintenanceInterval();
 void handleMaintenancePage();
 void handleMaintenanceLogList();
 void handleMaintenanceLogAdd();
-void handleGpsEnable();
-void handleGpsDisable();
-void handleGpsStatus();
 void handleRestart();
 void handleMqttTest();
 
