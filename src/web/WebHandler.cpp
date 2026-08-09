@@ -3,6 +3,7 @@
 #include "../charging/output_component.h"
 #include "../connectivity/MqttPublisher.h"
 #include "../gps/GpsReader.h"
+#include "../gps/GpsJumpFilter.h"
 #include <time.h>
 
 namespace {
@@ -28,6 +29,8 @@ extern unsigned long maxLoopDurationUs;
 extern MqttPublisher mqttPublisher;
 extern const char* mqtt_host;
 extern GpsReader gpsReader;
+extern GpsJumpFilter gpsJumpFilter;
+extern bool gpsHasAcceptedFix;
 bool web_initialized = false;
 
 void setupWebServer() {
@@ -378,10 +381,12 @@ void handleData() {
   doc["engineProbing"] = engine_probing;
   doc["overvoltageAlert"] = overvoltage_alert;
   doc["gpsConnected"] = gpsReader.isConnected();
-  doc["gpsHasFix"] = gpsReader.hasFix();
-  if (gpsReader.hasFix()) {
-    doc["gpsLat"] = gpsReader.latitude();
-    doc["gpsLon"] = gpsReader.longitude();
+  doc["gpsHasFix"] = gpsHasAcceptedFix;
+  if (gpsHasAcceptedFix) {
+    // filtered position (see GpsJumpFilter) - rejects fixes implying an impossible
+    // speed, so a momentary GPS glitch doesn't show the tractor teleporting
+    doc["gpsLat"] = gpsJumpFilter.lastLat();
+    doc["gpsLon"] = gpsJumpFilter.lastLon();
     doc["gpsSpeedKmh"] = gpsReader.speedKmh();
   }
 

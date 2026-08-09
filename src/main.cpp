@@ -19,6 +19,7 @@
 #include "connectivity/MqttPublisher.h"
 #include "connectivity/PubSubMqttTransport.h"
 #include "gps/GpsReader.h"
+#include "gps/GpsJumpFilter.h"
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -169,6 +170,11 @@ unsigned long lastMqttPublish = 0;
 // GPS: optional hardware, gracefully absent if not wired up. isConnected()/hasFix()
 // gate everything - dashboard/MQTT only ever show GPS data once it's actually valid.
 GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
+
+// Rejects momentary GPS position jumps a tractor can't physically make (60km/h implied
+// speed cap; resyncs after 3 consecutive rejects rather than getting stuck on a bad seed).
+GpsJumpFilter gpsJumpFilter(60.0, 3);
+bool gpsHasAcceptedFix = false;
 
 // Global state
 OutputComponent alternator(RELAY_PIN, USE_PWM, ALTERNATOR_ACTIVE_STATE);
@@ -363,6 +369,9 @@ void loop() {
   connected = wifiConnectedSta;
   dnsServer.processNextRequest();
   gpsReader.update();
+  if(gpsReader.hasFix() && gpsJumpFilter.accept(gpsReader.latitude(), gpsReader.longitude(), currentMillis)) {
+    gpsHasAcceptedFix = true;
+  }
 
   ArduinoOTA.handle();
   server.handleClient();
