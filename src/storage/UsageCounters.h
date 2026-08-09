@@ -36,6 +36,8 @@ class UsageCounters {
 
     void resetMaintenanceCounter();
     void setServiceIntervalHours(uint32_t hours);
+    void forceSave(); // bypass the throttle - call right when the engine turns off,
+                       // since this hardware only has a few seconds of power left then
 
     uint32_t totalRunSeconds() const;
     uint32_t secondsSinceService() const;

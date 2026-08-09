@@ -58,6 +58,10 @@ void UsageCounters::save() {
   unsavedSeconds_ = 0;
 }
 
+void UsageCounters::forceSave() {
+  save();
+}
+
 uint32_t UsageCounters::totalRunSeconds() const { return data_.totalRunSeconds; }
 uint32_t UsageCounters::secondsSinceService() const { return data_.secondsSinceService; }
 uint32_t UsageCounters::serviceIntervalHours() const { return data_.serviceIntervalHours; }
