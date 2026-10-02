@@ -1,5 +1,4 @@
 #include "WifiManager.h"
-#include <Arduino.h>
 
 WifiManager::WifiManager(IWifiDriver& driver,
                           const char* staSsid, const char* staPassword,
@@ -24,7 +23,6 @@ void WifiManager::begin(unsigned long currentMillis) {
   // mutually exclusive on this radio (WIFI_AP_STA concurrency left the AP invisible),
   // so a STA attempt briefly takes the AP down and beginAP() brings it back after.
   driver_.beginAP(apSsid_, apPassword_);
-  Serial.println("AP up");
   mode_ = WifiMode::AP_FALLBACK;
   nextApRetry_ = currentMillis + apRetryIntervalMs_;
 }
@@ -35,13 +33,11 @@ void WifiManager::update(unsigned long currentMillis) {
       StaLinkStatus status = driver_.staStatus();
       if (status == StaLinkStatus::CONNECTED) {
         mode_ = WifiMode::CONNECTED_STA;
-        Serial.println("STA connected");
       } else if (currentMillis - staDeadline_ < (1UL << 31)) { // deadline reached (non-wrapping compare)
         driver_.stopSTA();
         driver_.beginAP(apSsid_, apPassword_); // restore AP: STA attempt used it exclusively
         mode_ = WifiMode::AP_FALLBACK;
         nextApRetry_ = currentMillis + apRetryIntervalMs_;
-        Serial.println("STA connection failed, staying on AP");
       }
       break;
     }

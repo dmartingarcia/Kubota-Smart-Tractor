@@ -4,6 +4,7 @@
 #include "../src/connectivity/WifiManager.h"
 #include "../src/charging/PidAutotuner.h"
 #include "../src/charging/EngineDetector.h"
+#include "../src/charging/PwmMirror.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
@@ -240,6 +241,58 @@ void test_engine_detector_reset_clears_stale_state() {
     detector.reset();
     TEST_ASSERT_FALSE(detector.engineRunning());
     TEST_ASSERT_TRUE(detector.update(12.0, 200000)); // starts a fresh pulse, not stuck in old state
+}
+
+
+void test_engine_detector_grace_keeps_running_through_voltage_sag() {
+    EngineDetector detector(2000, 60000, 0.3, 15000);
+    detector.noteRunning(1000);                       // PID/OFF branch saw the engine charging
+    TEST_ASSERT_TRUE(detector.update(12.8, 2000));    // sag below low threshold, no rise possible
+    TEST_ASSERT_TRUE(detector.engineRunning());
+    TEST_ASSERT_FALSE(detector.isProbing());
+    TEST_ASSERT_TRUE(detector.update(12.8, 9000));    // still inside grace
+    TEST_ASSERT_TRUE(detector.engineRunning());
+}
+
+void test_engine_detector_grace_expires_into_probe() {
+    EngineDetector detector(2000, 60000, 0.3, 15000);
+    detector.noteRunning(1000);
+    TEST_ASSERT_TRUE(detector.update(12.8, 17000));   // grace over -> fresh probe pulse
+    TEST_ASSERT_TRUE(detector.isProbing());
+    TEST_ASSERT_FALSE(detector.update(12.8, 19000));  // dry pulse -> stopped
+    TEST_ASSERT_FALSE(detector.engineRunning());
+}
+
+void test_engine_detector_reset_drops_grace() {
+    EngineDetector detector(2000, 60000, 0.3, 15000);
+    detector.noteRunning(1000);
+    detector.reset();
+    TEST_ASSERT_TRUE(detector.update(12.8, 2000));
+    TEST_ASSERT_TRUE(detector.isProbing());
+}
+
+void test_median_reading_rejects_spike() {
+    int s[5] = {500, 502, 1023, 501, 499};
+    TEST_ASSERT_EQUAL_INT(501, median_reading(s, 5));
+    int single[1] = {7};
+    TEST_ASSERT_EQUAL_INT(7, median_reading(single, 1));
+}
+
+void test_mirror_duty_follows_output_exactly() {
+    TEST_ASSERT_EQUAL_UINT16(0, mirror_duty(0, 1023, false));
+    TEST_ASSERT_EQUAL_UINT16(512, mirror_duty(512, 1023, false));
+    TEST_ASSERT_EQUAL_UINT16(1023, mirror_duty(1023, 1023, false));
+}
+
+void test_mirror_duty_inverts_for_active_low_led() {
+    TEST_ASSERT_EQUAL_UINT16(1023, mirror_duty(0, 1023, true));   // output off -> LED off (pin high)
+    TEST_ASSERT_EQUAL_UINT16(0, mirror_duty(1023, 1023, true));   // output full -> LED full (pin low)
+    TEST_ASSERT_EQUAL_UINT16(511, mirror_duty(512, 1023, true));
+}
+
+void test_mirror_duty_clamps_overrange() {
+    TEST_ASSERT_EQUAL_UINT16(1023, mirror_duty(2000, 1023, false));
+    TEST_ASSERT_EQUAL_UINT16(0, mirror_duty(2000, 1023, true));
 }
 
 // Test-only fake store: in-memory blob, no real flash.
@@ -513,6 +566,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_engine_detector_backs_off_after_a_dry_pulse);
     RUN_TEST(test_engine_detector_waits_full_cooldown_before_next_pulse);
     RUN_TEST(test_engine_detector_reset_clears_stale_state);
+    RUN_TEST(test_engine_detector_grace_keeps_running_through_voltage_sag);
+    RUN_TEST(test_engine_detector_grace_expires_into_probe);
+    RUN_TEST(test_engine_detector_reset_drops_grace);
+    RUN_TEST(test_median_reading_rejects_spike);
+    RUN_TEST(test_mirror_duty_follows_output_exactly);
+    RUN_TEST(test_mirror_duty_inverts_for_active_low_led);
+    RUN_TEST(test_mirror_duty_clamps_overrange);
     RUN_TEST(test_usage_counters_first_boot_uses_defaults);
     RUN_TEST(test_usage_counters_accumulate_only_while_engine_active);
     RUN_TEST(test_usage_counters_throttles_writes);

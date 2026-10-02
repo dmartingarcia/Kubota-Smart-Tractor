@@ -1,11 +1,29 @@
 #include "EngineDetector.h"
 
-EngineDetector::EngineDetector(unsigned long pulseDurationMs, unsigned long cooldownMs, float voltageRiseVolts)
+EngineDetector::EngineDetector(unsigned long pulseDurationMs, unsigned long cooldownMs, float voltageRiseVolts, unsigned long graceMs)
   : pulseDurationMs_(pulseDurationMs), cooldownMs_(cooldownMs), voltageRiseVolts_(voltageRiseVolts),
     started_(false), phase_(Phase::PULSING), phaseStartMillis_(0), baselineVoltage_(0), engineRunning_(false),
-    probing_(false) {}
+    probing_(false), graceMs_(graceMs), lastRunningMillis_(0), hasRunning_(false) {}
+
+void EngineDetector::noteRunning(unsigned long currentMillis) {
+  hasRunning_ = true;
+  lastRunningMillis_ = currentMillis;
+  started_ = false; // next probe (after grace) starts fresh
+  engineRunning_ = true;
+  probing_ = false;
+}
 
 bool EngineDetector::update(float voltage, unsigned long currentMillis) {
+  if (hasRunning_) {
+    if (currentMillis - lastRunningMillis_ < graceMs_) {
+      engineRunning_ = true;
+      probing_ = false;
+      return true;
+    }
+    hasRunning_ = false;
+    engineRunning_ = false;
+  }
+
   if (!started_) {
     started_ = true;
     phase_ = Phase::PULSING;
@@ -50,6 +68,7 @@ bool EngineDetector::isProbing() const {
 }
 
 void EngineDetector::reset() {
+  hasRunning_ = false;
   started_ = false;
   engineRunning_ = false;
   probing_ = false;

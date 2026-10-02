@@ -10,9 +10,14 @@ class OutputComponent {
     bool activeState;
     uint16_t currentPWM;
     uint16_t maxPWM;
+    int8_t mirrorPin;
+    bool mirrorActiveLow;
+
+    void write(uint16_t duty); // single choke point: output pin + mirror pin get the same duty
 
   public:
-    OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue = 1024);
+    OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue = 1023,
+                    int8_t mirrorPin = -1, bool mirrorActiveLow = false);
 
     void set(bool state);
     void pwm(uint16_t value);

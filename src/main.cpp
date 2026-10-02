@@ -108,7 +108,7 @@ void updateWifi(unsigned long currentMillis) {
 #define VOLTAGE_THRESHOLD_HIGH        14.4
 #define VOLTAGE_THRESHOLD_LOW         13.0
 #define INPUT_VOLTAGE                 A0
-#define SAMPLES                       5
+#define SAMPLES                       9
 #define LED_PIN                       D4
 #define RELAY_PIN                     D3
 #define GPS_RX_PIN                    D5 // ESP8266 RX, wired to the GPS module's TX
@@ -117,10 +117,12 @@ void updateWifi(unsigned long currentMillis) {
 #define RELAY_ACTIVATION_DELAY        20000
 #define ALTERNATOR_ACTIVE_STATE       HIGH
 #define USE_PWM                       true
-#define MAX_CHARGE_CURRENT_PWM        1024
+#define MAX_CHARGE_CURRENT_PWM        1023 // matches analogWriteRange in OutputComponent
+#define LED_ACTIVE_LOW                true // Wemos D1 Mini on-board LED lights when D4 is LOW
 #define ENGINE_PROBE_PULSE_MS         2000  // hold full output this long before checking for a voltage rise
 #define ENGINE_PROBE_COOLDOWN_MS      60000 // wait this long before the next pulse if the engine looks off
 #define ENGINE_PROBE_RISE_VOLTS       0.3   // minimum voltage rise during a pulse to call the engine running
+#define ENGINE_RUNNING_GRACE_MS       15000 // after seeing the engine charging, ride out voltage sags this long before probing
 
 // PID Configuration
 #define PID_SAMPLE_TIME       20   // ms
@@ -177,8 +179,9 @@ GpsJumpFilter gpsJumpFilter(60.0, 3);
 bool gpsHasAcceptedFix = false;
 
 // Global state
-OutputComponent alternator(RELAY_PIN, USE_PWM, ALTERNATOR_ACTIVE_STATE);
-EngineDetector engineDetector(ENGINE_PROBE_PULSE_MS, ENGINE_PROBE_COOLDOWN_MS, ENGINE_PROBE_RISE_VOLTS);
+// LED_PIN mirrors the alternator output PWM 1:1 (same duty, every write path).
+OutputComponent alternator(RELAY_PIN, USE_PWM, ALTERNATOR_ACTIVE_STATE, MAX_CHARGE_CURRENT_PWM, LED_PIN, LED_ACTIVE_LOW);
+EngineDetector engineDetector(ENGINE_PROBE_PULSE_MS, ENGINE_PROBE_COOLDOWN_MS, ENGINE_PROBE_RISE_VOLTS, ENGINE_RUNNING_GRACE_MS);
 DataPoint history[HISTORY_SIZE];
 byte historyIndex = 0;
 bool connected = false;
@@ -230,18 +233,13 @@ void setup() {
 
 float read_voltage() {
   static int samples[SAMPLES];
-  float total = 0;
 
-  // Collect samples
   for (int i = 0; i < SAMPLES; i++) {
     samples[i] = analogRead(INPUT_VOLTAGE);
   }
 
-  // Calculate moving average
-  for (int i = 0; i < SAMPLES; i++) total += samples[i];
-  float avg_reading = total / SAMPLES;
-
-  return calibrate_voltage(avg_reading, 1024.0, 3.3, CALIBRATION_IN_VOLTAGE, CALIBRATION_A0_VOLTAGE);
+  // Median, not mean: alternator ripple/spikes at high RPM must not move the reading.
+  return calibrate_voltage(median_reading(samples, SAMPLES), 1024.0, 3.3, CALIBRATION_IN_VOLTAGE, CALIBRATION_A0_VOLTAGE);
 }
 
 int lastTargetPWM = 0;
@@ -262,7 +260,7 @@ void manage_alternator() {
         case ChargeAction::OFF:
           alternator.off();
           lastTargetPWM = 0;
-          engineDetector.reset();
+          engineDetector.noteRunning(millis());
           engine_running = true; // voltage this high means something is charging it
           engine_probing = false;
           overvoltage_alert = true;
@@ -282,7 +280,7 @@ void manage_alternator() {
           engine_probing = engineDetector.isProbing();
           break;
         case ChargeAction::RUN_PID: {
-          engineDetector.reset();
+          engineDetector.noteRunning(millis());
           engine_running = true; // alternator has already raised voltage out of the probe zone
           engine_probing = false;
           if(autotuneActive) {
@@ -304,7 +302,6 @@ void manage_alternator() {
           } else {
             int targetPWM = static_cast<int>(pidOutput);
             alternator.pwm(targetPWM);
-            analogWrite(LED_PIN, map(targetPWM, 0, MAX_CHARGE_CURRENT_PWM, 300, 1023));
             lastTargetPWM = targetPWM;
           }
           break;

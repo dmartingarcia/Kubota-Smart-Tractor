@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "PwmMirror.h"
 
 #define OUTPUT_PIN              D1
 #define PWM_FREQUENCY           5000    // 5kHz for MOSFET
@@ -7,14 +8,17 @@
 #include "output_component.h"
 #include <Arduino.h>
 
-OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue)
+OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool activeState, uint16_t maxPWMValue, int8_t mirrorPin, bool mirrorActiveLow)
   : pin(outputPin),
     isPWM(pwmEnabled),
     activeState(activeState),
     currentPWM(0),
-    maxPWM(maxPWMValue)
+    maxPWM(maxPWMValue),
+    mirrorPin(mirrorPin),
+    mirrorActiveLow(mirrorActiveLow)
 {
   pinMode(pin, OUTPUT);
+  if(mirrorPin >= 0) pinMode(mirrorPin, OUTPUT);
   if(isPWM) {
     analogWriteFreq(PWM_FREQUENCY);  // 5kHz frequency
     analogWriteRange(PWM_RESOLUTION);  // 10-bit resolution
@@ -22,9 +26,14 @@ OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool active
   off();
 }
 
+void OutputComponent::write(uint16_t duty) {
+  analogWrite(pin, duty);
+  if(mirrorPin >= 0) analogWrite(mirrorPin, mirror_duty(duty, maxPWM, mirrorActiveLow));
+}
+
 void OutputComponent::set(bool state) {
   if(isPWM) {
-    analogWrite(pin, state ? maxPWM : 0);
+    write(state ? maxPWM : 0);
     currentPWM = state ? maxPWM : 0;
   } else {
     digitalWrite(pin, state ? activeState : !activeState);
@@ -34,13 +43,13 @@ void OutputComponent::set(bool state) {
 void OutputComponent::pwm(uint16_t value) {
   if(isPWM) {
     currentPWM = constrain(value, 0, maxPWM);
-    analogWrite(pin, currentPWM);
+    write(currentPWM);
   }
 }
 
 void OutputComponent::off() {
   if(isPWM) {
-    analogWrite(pin, 0);
+    write(0);
   } else {
     digitalWrite(pin, !activeState);
   }

@@ -10,7 +10,15 @@
 // means the engine is off: back off for cooldownMs before trying another pulse.
 class EngineDetector {
   public:
-    EngineDetector(unsigned long pulseDurationMs, unsigned long cooldownMs, float voltageRiseVolts);
+    EngineDetector(unsigned long pulseDurationMs, unsigned long cooldownMs, float voltageRiseVolts,
+                   unsigned long graceMs = 0);
+
+    // Call whenever other evidence says the engine is running (voltage in the PID band or
+    // over the cutoff). For graceMs afterwards, a voltage sag below the low threshold keeps
+    // the alternator driven and the engine "running" instead of triggering a probe: at high
+    // RPM the alternator is already at its limit, so a probe pulse can't show a further
+    // rise and would wrongly declare the engine stopped.
+    void noteRunning(unsigned long currentMillis);
 
     // Call every cycle while the safety envelope calls for full charge output.
     // Returns whether the alternator should be driven this cycle.
@@ -40,6 +48,9 @@ class EngineDetector {
     float baselineVoltage_;
     bool engineRunning_;
     bool probing_;
+    unsigned long graceMs_;
+    unsigned long lastRunningMillis_;
+    bool hasRunning_;
 };
 
 #endif

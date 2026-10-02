@@ -30,7 +30,8 @@ ESP8266-based intelligent charging system with adaptive PID control and web moni
   fix - gracefully absent if it's not wired up
 - 🔄 **OTA Updates** - Wireless firmware upgrades
 - 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status (including a
-  distinct "PROBING" state while testing for a running engine)
+  distinct "PROBING" state while testing for a running engine; once charging has been seen
+  the engine stays "RUNNING" through voltage sags for `ENGINE_RUNNING_GRACE_MS` before any probe)
 - 🔒 **Safety envelope** - Over-voltage cutoff (14.4V) always enforced, including during
   autotune, with a 60s-latched dashboard/MQTT alert so a brief spike doesn't go
   unnoticed (see [Safety Systems](#safety-systems-️))
@@ -135,7 +136,9 @@ pio test -e native
 |---|---|
 | `VoltageSensor` / `AlternatorLogic` | Calibration math, safety thresholds, relay hysteresis, PID cycle scheduling |
 | `RealTimePid` | Elapsed-time-scaled PID math, anti-windup clamping |
-| `EngineDetector` | Probe-pulse engine detection state machine (probing/running/stopped) |
+| `EngineDetector` | Probe-pulse engine detection state machine (probing/running/stopped), plus the running-grace window that rides out voltage sags at high RPM |
+| `PwmMirror` | Duty mirrored from the alternator output onto the LED (clamping, active-low inversion) |
+| `VoltageSensor` (median) | Median-of-N ADC filter that rejects alternator ripple/spikes |
 | `PidAutotuner` | Relay-feedback autotune math (Ku/Pu → Kp/Ki/Kd) |
 | `UsageCounters` (+ `IFlashStore`) | Charging-hours/boot-count accumulation, throttled saves, against an in-memory fake |
 | `MqttPublisher` (+ `IMqttTransport`) | Sample/publish decoupling, batched payloads, offline buffering/flush, HA discovery, reconnect throttling, against a fake transport |
@@ -169,7 +172,9 @@ IP. Otherwise (or always, as a fallback), connect to the AP WiFi network and bro
 plain `<canvas>`, no CDN) so it renders correctly even fully offline in AP mode.
 
 **Dashboard (`/`):**
-- Real-time voltage chart (last ~10min of history)
+- Large colour-coded battery voltage, light/dark theme (follows the device), lost-connection
+  and maintenance-due banners
+- Real-time voltage chart (last ~10min of history) with the 13.0V/14.4V thresholds marked
 - PWM%/Relay status, engine status (RUNNING/PROBING/STOPPED)
 - WiFi mode (home network vs. AP) and what that means for HA/MQTT reachability
 - PID autotune trigger + status
@@ -232,9 +237,14 @@ it yet).
   non-blocking. Acceptable given the cadence, but worth knowing.
 
 ## System Indicators 💡
-The status LED tracks PID output brightness while in PWM mode (dim = low charge
-output, bright = high); there are no distinct blink patterns for WiFi/relay state.
-Use the web dashboard for WiFi/mode status instead.
+The status LED (`LED_PIN`, D4) replicates the alternator output PWM one-to-one: every
+duty written to the output pin is written, with the same value, to the LED
+(`OutputComponent` mirror pin, `mirror_duty()` in `PwmMirror`). LED brightness is
+therefore the real field drive - off when the alternator is off or probing is in its
+cooldown, full during a probe pulse/`MAX_CHARGE`, proportional while the PID runs.
+`LED_ACTIVE_LOW` (default `true`, the Wemos D1 Mini on-board LED) inverts the duty so
+brightness still follows the output; set it to `false` for an external active-high LED.
+Use the web dashboard for WiFi/mode status.
 
 ## OTA Updates 🛠️
 1. Connect to the AP WiFi network (`ap_ssid`/`ap_password` from `secrets.h`)
