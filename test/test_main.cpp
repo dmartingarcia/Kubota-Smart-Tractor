@@ -318,21 +318,12 @@ void test_engine_detector_small_rise_is_enough_during_pulse() {
     TEST_ASSERT_TRUE(detector.engineRunning());
 }
 
-void test_engine_detector_battery_recovery_does_not_end_cooldown() {
+void test_engine_detector_cooldown_ignores_voltage_until_it_elapses() {
     EngineDetector detector(3000, 8000, 0.05);
     detector.update(12.60, 0);          // resting level
     detector.update(12.30, 3000);       // sagged under field load, dry pulse -> cooldown
     TEST_ASSERT_FALSE(detector.update(12.60, 4000)); // recovers to rest: not a start
     TEST_ASSERT_FALSE(detector.update(12.62, 5000));
-}
-
-void test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own() {
-    EngineDetector detector(2000, 60000, 0.3);
-    detector.update(12.5, 0);
-    detector.update(12.5, 2000);                      // dry pulse -> cooldown, baseline 12.5
-    TEST_ASSERT_FALSE(detector.update(12.6, 5000));   // small drift, still cooling down
-    TEST_ASSERT_TRUE(detector.update(12.9, 6000));    // +0.4V with no drive: engine started -> probe now
-    TEST_ASSERT_TRUE(detector.isProbing());
 }
 
 // Test-only fake store: in-memory blob, no real flash.
@@ -723,8 +714,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_engine_detector_grace_expires_into_probe);
     RUN_TEST(test_engine_detector_reset_drops_grace);
     RUN_TEST(test_engine_detector_small_rise_is_enough_during_pulse);
-    RUN_TEST(test_engine_detector_battery_recovery_does_not_end_cooldown);
-    RUN_TEST(test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own);
+    RUN_TEST(test_engine_detector_cooldown_ignores_voltage_until_it_elapses);
     RUN_TEST(test_median_reading_rejects_spike);
     RUN_TEST(test_mirror_duty_follows_output_exactly);
     RUN_TEST(test_mirror_duty_inverts_for_active_low_led);

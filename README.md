@@ -31,7 +31,7 @@ ESP8266-based intelligent charging system with adaptive PID control and web moni
 - 🔄 **OTA Updates** - Wireless firmware upgrades
 - 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status (including a
   distinct "PROBING" state while testing for a running engine; once charging has been seen
-  the engine stays "RUNNING" through voltage sags for `ENGINE_RUNNING_GRACE_MS` before any probe; when the engine looks off, probes repeat every 8s (a 0.05V rise during a pulse counts as running) and a 0.3V rise above the resting voltage during the wait triggers one immediately, so charging starts soon after RPM picks up). A valid GPS fix with speed above `ENGINE_GPS_MIN_SPEED_KMH` (3 km/h) also counts as engine running and skips probing
+  the engine stays "RUNNING" through voltage sags for `ENGINE_RUNNING_GRACE_MS` before any probe; when the engine looks off, probes repeat every 8s (a 0.05V rise during a pulse counts as running), so charging starts soon after RPM picks up). A valid GPS fix with speed above `ENGINE_GPS_MIN_SPEED_KMH` (3 km/h) also counts as engine running and skips probing
 - 🔒 **Safety envelope** - Over-voltage cutoff (14.4V) always enforced, including during
   autotune, with a 60s-latched dashboard/MQTT alert so a brief spike doesn't go
   unnoticed (see [Safety Systems](#safety-systems-️))
@@ -253,7 +253,7 @@ in `/engine_mode.bin`; any combination, empty falls back to GPS + alternator).
 | >= 14.4V | field **off**, overvoltage alert latched 60s; engine on if "always"/"alternator" selected |
 | 13.0V - 14.4V | PID regulates to 14.0V (autotune swings output here); engine on if "always"/"alternator" selected |
 | <= 13.0V, engine forced on (always, or GPS moving) | field at **100%** immediately, no probing |
-| <= 13.0V, alternator source only | probe: 3s full-field pulse; rise >= 0.05V = running, else off for 8s (ends early if voltage rises 0.3V above rest); 15s grace after any sign of charging so sags at high RPM don't stop the drive |
+| <= 13.0V, alternator source only | probe: 3s full-field pulse; rise >= 0.05V = running, else off for 8s; 15s grace after any sign of charging so sags at high RPM don't stop the drive |
 | <= 13.0V, only GPS selected and standing still | field off, engine off |
 
 The LED mirrors the final duty written to the field pin in every case.
