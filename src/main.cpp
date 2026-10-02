@@ -122,6 +122,7 @@ void updateWifi(unsigned long currentMillis) {
 #define ENGINE_PROBE_PULSE_MS         3000  // hold full output this long before checking for a voltage rise
 #define ENGINE_PROBE_COOLDOWN_MS      8000  // wait this long before the next pulse if the engine looks off
 #define ENGINE_PROBE_RISE_VOLTS       0.05  // minimum voltage rise during a pulse to call the engine running
+#define ENGINE_GPS_MIN_SPEED_KMH      3.0   // moving faster than this (valid GPS fix) means the engine is on
 #define ENGINE_RUNNING_GRACE_MS       15000 // after seeing the engine charging, ride out voltage sags this long before probing
 
 // PID Configuration
@@ -269,6 +270,10 @@ void manage_alternator() {
         case ChargeAction::MAX_CHARGE:
           // Voltage this low is also where a resting, engine-off battery sits, so don't just
           // hold the field coil at 100% and drain it further — probe with pulses instead.
+          if(gps_indicates_engine_running(gpsReader.hasFix(), gpsReader.fixAgeMs(), gpsReader.speedKmh(),
+                                          ENGINE_GPS_MIN_SPEED_KMH)) {
+            engineDetector.noteRunning(millis()); // moving => engine on, charge now without probing
+          }
           if(engineDetector.update(current_voltage, millis())) {
             alternator.pwm(MAX_CHARGE_CURRENT_PWM);
             lastTargetPWM = MAX_CHARGE_CURRENT_PWM;

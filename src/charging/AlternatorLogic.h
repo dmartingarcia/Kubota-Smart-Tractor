@@ -15,6 +15,12 @@ bool should_run_cycle(unsigned long currentMillis, unsigned long lastRunMillis, 
 // threshold and MAX below the low threshold, otherwise defers to PID.
 ChargeAction decide_pwm_safety_action(float voltage, float thresholdHigh, float thresholdLow);
 
+// A tractor that is moving under GPS (valid, fresh fix and speed >= minSpeedKmh, above
+// standstill jitter) has its engine running - a second signal besides voltage, useful
+// at idle RPM where the alternator barely lifts the voltage. maxFixAgeMs guards against
+// a stale speed value after the fix is lost.
+bool gps_indicates_engine_running(bool hasFix, unsigned long fixAgeMs, double speedKmh, double minSpeedKmh);
+
 struct RelayDecision {
   bool state;
   unsigned long nextCheck;

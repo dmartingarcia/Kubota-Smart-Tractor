@@ -21,3 +21,8 @@ RelayDecision decide_relay_state(bool currentState, float voltage, unsigned long
   }
   return RelayDecision{currentState, nextRelayCheck, false};
 }
+
+bool gps_indicates_engine_running(bool hasFix, unsigned long fixAgeMs, double speedKmh, double minSpeedKmh) {
+  const unsigned long kMaxFixAgeMs = 3000;
+  return hasFix && fixAgeMs <= kMaxFixAgeMs && speedKmh >= minSpeedKmh;
+}

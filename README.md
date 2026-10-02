@@ -31,7 +31,7 @@ ESP8266-based intelligent charging system with adaptive PID control and web moni
 - 🔄 **OTA Updates** - Wireless firmware upgrades
 - 📊 **Advanced Telemetry** - Voltage, PWM%, PID output, and engine status (including a
   distinct "PROBING" state while testing for a running engine; once charging has been seen
-  the engine stays "RUNNING" through voltage sags for `ENGINE_RUNNING_GRACE_MS` before any probe; when the engine looks off, probes repeat every 8s (a 0.05V rise during a pulse counts as running) and a 0.3V rise above the resting voltage during the wait triggers one immediately, so charging starts soon after RPM picks up)
+  the engine stays "RUNNING" through voltage sags for `ENGINE_RUNNING_GRACE_MS` before any probe; when the engine looks off, probes repeat every 8s (a 0.05V rise during a pulse counts as running) and a 0.3V rise above the resting voltage during the wait triggers one immediately, so charging starts soon after RPM picks up). A valid GPS fix with speed above `ENGINE_GPS_MIN_SPEED_KMH` (3 km/h) also counts as engine running and skips probing
 - 🔒 **Safety envelope** - Over-voltage cutoff (14.4V) always enforced, including during
   autotune, with a 60s-latched dashboard/MQTT alert so a brief spike doesn't go
   unnoticed (see [Safety Systems](#safety-systems-️))

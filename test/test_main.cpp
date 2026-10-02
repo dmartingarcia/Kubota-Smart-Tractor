@@ -65,6 +65,20 @@ void test_relay_turns_on_below_low_threshold_after_delay() {
     TEST_ASSERT_EQUAL_UINT32(45000, d.nextCheck);
 }
 
+void test_gps_motion_means_engine_running() {
+    TEST_ASSERT_TRUE(gps_indicates_engine_running(true, 500, 5.0, 3.0));
+    TEST_ASSERT_TRUE(gps_indicates_engine_running(true, 500, 3.0, 3.0)); // boundary inclusive
+}
+
+void test_gps_standstill_noise_is_not_motion() {
+    TEST_ASSERT_FALSE(gps_indicates_engine_running(true, 500, 1.2, 3.0));
+}
+
+void test_gps_motion_ignored_without_fresh_fix() {
+    TEST_ASSERT_FALSE(gps_indicates_engine_running(false, 500, 20.0, 3.0));  // no fix
+    TEST_ASSERT_FALSE(gps_indicates_engine_running(true, 10000, 20.0, 3.0)); // stale speed
+}
+
 void test_should_run_cycle_respects_interval() {
     TEST_ASSERT_FALSE(should_run_cycle(10, 0, 20));   // 10ms elapsed, interval 20ms -> not yet
     TEST_ASSERT_TRUE(should_run_cycle(20, 0, 20));     // exactly on interval -> run
@@ -574,6 +588,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_relay_overvoltage_turns_off_and_starts_delay);
     RUN_TEST(test_relay_stays_off_during_delay_window);
     RUN_TEST(test_relay_turns_on_below_low_threshold_after_delay);
+    RUN_TEST(test_gps_motion_means_engine_running);
+    RUN_TEST(test_gps_standstill_noise_is_not_motion);
+    RUN_TEST(test_gps_motion_ignored_without_fresh_fix);
     RUN_TEST(test_should_run_cycle_respects_interval);
     RUN_TEST(test_should_run_cycle_handles_millis_rollover);
     RUN_TEST(test_wifi_manager_connects_sta_before_timeout);
