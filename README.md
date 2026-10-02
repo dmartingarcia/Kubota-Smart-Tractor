@@ -143,7 +143,6 @@ pio test -e native
 | `UsageCounters` (+ `IFlashStore`) | Charging-hours/boot-count accumulation, throttled saves, against an in-memory fake |
 | `MqttPublisher` (+ `IMqttTransport`) | Sample/publish decoupling, batched payloads, offline buffering/flush, HA discovery, reconnect throttling, against a fake transport |
 | `MaintenanceLog` (+ `IMaintenanceLogStore`) | Note sanitization, log round-trip, against a fake store |
-| `WifiManager` (+ `IWifiDriver`) | STA/AP fallback state machine, against a fake driver - **no longer used by `main.cpp`** (which now does plain exclusive AP/STA directly), kept only because it's still covered here |
 
 `main.cpp` wires these pure/HAL-backed decisions into the real hardware calls (PID,
 PWM, relay, WiFi, flash, MQTT, GPS). When touching any of this behavior, add/extend a

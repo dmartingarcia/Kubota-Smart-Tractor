@@ -7,7 +7,7 @@
 
 // Real hardware IMqttTransport impl (PubSubClient over TCP). Excluded from native tests.
 // Socket timeout is kept short so a broker that's unreachable can't stall the caller
-// (and therefore the PID loop) for long - see WifiManager/should_run_cycle for the
+// (and therefore the PID loop) for long - see should_run_cycle for the
 // same non-blocking-cadence concern.
 class PubSubMqttTransport : public IMqttTransport {
   public:

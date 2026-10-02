@@ -1,7 +1,6 @@
 #include <unity.h>
 #include "../src/charging/VoltageSensor.h"
 #include "../src/charging/AlternatorLogic.h"
-#include "../src/connectivity/WifiManager.h"
 #include "../src/charging/PidAutotuner.h"
 #include "../src/charging/EngineDetector.h"
 #include "../src/charging/PwmMirror.h"
@@ -16,19 +15,6 @@
 
 void setUp() {}
 void tearDown() {}
-
-// Test-only fake driver: no real WiFi, fully controllable/inspectable.
-class FakeWifiDriver : public IWifiDriver {
-  public:
-    StaLinkStatus statusToReport = StaLinkStatus::CONNECTING;
-    int beginSTACalls = 0;
-    int beginAPCalls = 0;
-
-    void beginSTA(const char*, const char*) override { beginSTACalls++; }
-    StaLinkStatus staStatus() override { return statusToReport; }
-    void beginAP(const char*, const char*) override { beginAPCalls++; }
-    void stopSTA() override {}
-};
 
 void test_voltage_calibration() {
     // 2.90V at A0 corresponds to the calibrated 15.25V reference.
@@ -95,73 +81,6 @@ void test_should_run_cycle_handles_millis_rollover() {
     unsigned long current = 15;                              // 20ms later after wraparound
     TEST_ASSERT_TRUE(should_run_cycle(current, lastRun, 20));
     TEST_ASSERT_FALSE(should_run_cycle(10, lastRun, 20));
-}
-
-void test_wifi_manager_connects_sta_before_timeout() {
-    FakeWifiDriver driver;
-    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
-    wm.begin(0);
-    TEST_ASSERT_EQUAL(1, driver.beginAPCalls); // AP is always brought up immediately in begin()
-    TEST_ASSERT_EQUAL(1, driver.beginSTACalls);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
-
-    driver.statusToReport = StaLinkStatus::CONNECTED;
-    wm.update(5000);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTED_STA), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(1, driver.beginAPCalls); // AP comes up unconditionally in begin(), stays up
-}
-
-void test_wifi_manager_falls_back_to_ap_after_timeout() {
-    FakeWifiDriver driver;
-    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
-    wm.begin(0);
-
-    driver.statusToReport = StaLinkStatus::CONNECTING;
-    wm.update(5000);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
-
-    wm.update(10000); // timeout reached, still not connected
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(1, driver.beginAPCalls);
-}
-
-void test_wifi_manager_retries_sta_periodically_from_ap_fallback() {
-    FakeWifiDriver driver;
-    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
-    wm.begin(0);
-    wm.update(10000); // -> AP_FALLBACK
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
-
-    wm.update(30000); // retry interval not elapsed yet
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(1, driver.beginSTACalls);
-
-    wm.update(70000); // 60s retry interval elapsed since AP fallback started at 10000
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(2, driver.beginSTACalls);
-}
-
-void test_wifi_manager_reconnects_sta_after_drop() {
-    FakeWifiDriver driver;
-    WifiManager wm(driver, "home", "pw", "AP", "appw", 10000, 60000);
-    wm.begin(0);
-    driver.statusToReport = StaLinkStatus::CONNECTED;
-    wm.update(1000);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTED_STA), static_cast<int>(wm.mode()));
-
-    driver.statusToReport = StaLinkStatus::FAILED;
-    wm.update(2000);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::CONNECTING_STA), static_cast<int>(wm.mode()));
-    TEST_ASSERT_EQUAL(2, driver.beginSTACalls);
-}
-
-void test_wifi_manager_skips_sta_when_ssid_empty() {
-    FakeWifiDriver driver;
-    WifiManager wm(driver, "", "", "AP", "appw", 10000, 60000);
-    wm.begin(0);
-    TEST_ASSERT_EQUAL(0, driver.beginSTACalls);
-    TEST_ASSERT_EQUAL(1, driver.beginAPCalls);
-    TEST_ASSERT_EQUAL(static_cast<int>(WifiMode::AP_FALLBACK), static_cast<int>(wm.mode()));
 }
 
 void test_autotune_computes_gains_from_relay_oscillation() {
@@ -729,11 +648,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_gps_motion_ignored_without_fresh_fix);
     RUN_TEST(test_should_run_cycle_respects_interval);
     RUN_TEST(test_should_run_cycle_handles_millis_rollover);
-    RUN_TEST(test_wifi_manager_connects_sta_before_timeout);
-    RUN_TEST(test_wifi_manager_falls_back_to_ap_after_timeout);
-    RUN_TEST(test_wifi_manager_retries_sta_periodically_from_ap_fallback);
-    RUN_TEST(test_wifi_manager_reconnects_sta_after_drop);
-    RUN_TEST(test_wifi_manager_skips_sta_when_ssid_empty);
     RUN_TEST(test_autotune_computes_gains_from_relay_oscillation);
     RUN_TEST(test_autotune_fails_if_no_oscillation_within_runtime);
     RUN_TEST(test_autotune_fails_on_zero_amplitude);
