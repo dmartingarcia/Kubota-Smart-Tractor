@@ -276,6 +276,16 @@ therefore the real field drive - off when the alternator is off or probing is in
 cooldown, full during a probe pulse/`MAX_CHARGE`, proportional while the PID runs.
 `LED_ACTIVE_LOW` (default `true`, the Wemos D1 Mini on-board LED) inverts the duty so
 brightness still follows the output; set it to `false` for an external active-high LED.
+On power-on the LED blinks 3 times (200ms on/off, `BOOT_BLINK_*`) to show the board is alive, then switches to mirroring the output.
+If something is wrong the LED shows a fault code instead of mirroring the output: N quick pulses,
+a 1s pause, repeat. It goes back to mirroring the output as soon as the fault clears.
+
+| Pulses | Fault |
+|---|---|
+| 2 | Overvoltage cutoff active (latched 60s after the last trigger) |
+| 3 | Battery voltage outside 8-17V: sense wiring / divider fault |
+| 4 | Free RAM below 6000 bytes: restart soon |
+
 Use the web dashboard for WiFi/mode status.
 
 ## OTA Updates 🛠️

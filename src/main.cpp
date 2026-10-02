@@ -11,6 +11,8 @@
 #include "charging/AlternatorLogic.h"
 #include "charging/EngineDetector.h"
 #include "charging/EngineMode.h"
+#include "charging/PwmMirror.h"
+#include "charging/StatusLed.h"
 #include "charging/PidAutotuner.h"
 #include "charging/RealTimePid.h"
 #include "storage/UsageCounters.h"
@@ -120,6 +122,10 @@ void updateWifi(unsigned long currentMillis) {
 #define ALTERNATOR_ACTIVE_STATE       HIGH
 #define USE_PWM                       true
 #define MAX_CHARGE_CURRENT_PWM        1023 // matches analogWriteRange in OutputComponent
+#define BOOT_BLINK_HALF_PERIOD_MS     200   // power-on LED blink: 3 pulses, 200ms on / 200ms off
+#define BOOT_BLINK_COUNT              3
+#define FAULT_BLINK_HALF_PERIOD_MS    120   // fault code: N quick pulses (see StatusLed.h), then FAULT_BLINK_PAUSE_MS dark
+#define FAULT_BLINK_PAUSE_MS          1000
 #define LED_ACTIVE_LOW                true // Wemos D1 Mini on-board LED lights when D4 is LOW
 #define ENGINE_PROBE_PULSE_MS         3000  // hold full output this long before checking for a voltage rise
 #define ENGINE_PROBE_COOLDOWN_MS      8000  // wait this long before the next pulse if the engine looks off
@@ -396,6 +402,37 @@ void loop() {
   if(should_run_cycle(currentMillis, lastVoltageRead, PID_SAMPLE_TIME)) {
     current_voltage = read_voltage();
     lastVoltageRead = currentMillis;
+  }
+
+  // "I'm alive" blink on power-on; owns the LED (mirror paused) until it finishes.
+  static unsigned long bootBlinkStart = currentMillis;
+  static bool bootBlinkDone = false;
+  if(!bootBlinkDone) {
+    unsigned long elapsed = currentMillis - bootBlinkStart;
+    if(boot_blink_active(elapsed, BOOT_BLINK_HALF_PERIOD_MS, BOOT_BLINK_COUNT)) {
+      alternator.setMirrorEnabled(false);
+      alternator.writeMirrorRaw(boot_blink_on(elapsed, BOOT_BLINK_HALF_PERIOD_MS, BOOT_BLINK_COUNT));
+    } else {
+      alternator.setMirrorEnabled(true);
+      bootBlinkDone = true;
+    }
+  }
+
+  // Fault code on the LED (after the boot blink): takes the LED over from the PWM mirror
+  // while a fault is active, hands it back as soon as it clears.
+  if(bootBlinkDone) {
+    static LedFault shownFault = LedFault::NONE;
+    static unsigned long faultStart = 0;
+    LedFault fault = decide_led_fault(current_voltage, overvoltage_alert, ESP.getFreeHeap());
+    if(fault != LedFault::NONE) {
+      if(fault != shownFault) faultStart = currentMillis; // restart the pattern on a new code
+      alternator.setMirrorEnabled(false);
+      alternator.writeMirrorRaw(fault_blink_on(currentMillis - faultStart, static_cast<int>(fault),
+                                               FAULT_BLINK_HALF_PERIOD_MS, FAULT_BLINK_PAUSE_MS));
+    } else if(shownFault != LedFault::NONE) {
+      alternator.setMirrorEnabled(true);
+    }
+    shownFault = fault;
   }
 
   updateWifi(currentMillis);

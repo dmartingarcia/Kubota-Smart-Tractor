@@ -12,6 +12,7 @@ class OutputComponent {
     uint16_t maxPWM;
     int8_t mirrorPin;
     bool mirrorActiveLow;
+    bool mirrorEnabled;
 
     void write(uint16_t duty); // single choke point: output pin + mirror pin get the same duty
 
@@ -22,6 +23,11 @@ class OutputComponent {
     void set(bool state);
     void pwm(uint16_t value);
     void off();
+
+    // While disabled the mirror pin is left alone (e.g. boot blink owns the LED); enabling
+    // it again immediately re-syncs the mirror pin to the current output duty.
+    void setMirrorEnabled(bool enabled);
+    void writeMirrorRaw(bool on); // drive the mirror pin fully on/off (active-low aware), independent of the output
 
     uint16_t getPWM() const;
     uint8_t getPWMPercent() const;

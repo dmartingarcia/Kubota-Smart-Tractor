@@ -4,6 +4,7 @@
 #include "../src/charging/PidAutotuner.h"
 #include "../src/charging/EngineDetector.h"
 #include "../src/charging/PwmMirror.h"
+#include "../src/charging/StatusLed.h"
 #include "../src/charging/RealTimePid.h"
 #include "../src/charging/EngineMode.h"
 #include "../src/storage/UsageCounters.h"
@@ -761,8 +762,58 @@ void test_pid_reset_discards_windup() {
     TEST_ASSERT_TRUE(out < 400);                                             // P-term only, no wound-up integral
 }
 
+void test_boot_blink_pattern() {
+    // 3 blinks, 200ms on / 200ms off
+    TEST_ASSERT_TRUE(boot_blink_on(0, 200, 3));
+    TEST_ASSERT_TRUE(boot_blink_on(199, 200, 3));
+    TEST_ASSERT_FALSE(boot_blink_on(200, 200, 3));
+    TEST_ASSERT_TRUE(boot_blink_on(400, 200, 3));   // second blink
+    TEST_ASSERT_TRUE(boot_blink_on(800, 200, 3));   // third blink
+    TEST_ASSERT_FALSE(boot_blink_on(1000, 200, 3));
+}
+
+void test_boot_blink_ends_after_last_blink() {
+    TEST_ASSERT_TRUE(boot_blink_active(1199, 200, 3));
+    TEST_ASSERT_FALSE(boot_blink_active(1200, 200, 3));
+    TEST_ASSERT_FALSE(boot_blink_on(1200, 200, 3));   // would be "on" in a 4th cycle, but pattern is over
+    TEST_ASSERT_FALSE(boot_blink_on(1600, 200, 3));
+}
+
+void test_led_fault_none_when_everything_is_normal() {
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::NONE), static_cast<int>(decide_led_fault(13.8f, false, 30000)));
+}
+
+void test_led_fault_priority() {
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::SENSOR_RANGE), static_cast<int>(decide_led_fault(0.0f, true, 1000)));  // sensor beats the rest
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::SENSOR_RANGE), static_cast<int>(decide_led_fault(18.0f, false, 30000)));
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::OVERVOLTAGE), static_cast<int>(decide_led_fault(14.6f, true, 1000)));  // then overvoltage
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::LOW_HEAP), static_cast<int>(decide_led_fault(13.8f, false, 5000)));
+    TEST_ASSERT_EQUAL(static_cast<int>(LedFault::NONE), static_cast<int>(decide_led_fault(12.4f, false, 6000))); // boundaries are fine
+}
+
+void test_fault_blink_pattern_pulses_then_pause() {
+    // 3 pulses, 120ms half period, 1000ms pause: pulses occupy 0..720, dark until 1720
+    TEST_ASSERT_TRUE(fault_blink_on(0, 3, 120, 1000));
+    TEST_ASSERT_FALSE(fault_blink_on(120, 3, 120, 1000));
+    TEST_ASSERT_TRUE(fault_blink_on(240, 3, 120, 1000));
+    TEST_ASSERT_TRUE(fault_blink_on(480, 3, 120, 1000));   // third pulse
+    TEST_ASSERT_FALSE(fault_blink_on(600, 3, 120, 1000));
+    TEST_ASSERT_FALSE(fault_blink_on(1000, 3, 120, 1000)); // pause
+    TEST_ASSERT_TRUE(fault_blink_on(1720, 3, 120, 1000));  // repeats
+}
+
+void test_fault_blink_zero_pulses_stays_dark() {
+    TEST_ASSERT_FALSE(fault_blink_on(0, 0, 120, 1000));
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_led_fault_none_when_everything_is_normal);
+    RUN_TEST(test_led_fault_priority);
+    RUN_TEST(test_fault_blink_pattern_pulses_then_pause);
+    RUN_TEST(test_fault_blink_zero_pulses_stays_dark);
+    RUN_TEST(test_boot_blink_pattern);
+    RUN_TEST(test_boot_blink_ends_after_last_blink);
     RUN_TEST(test_pid_reset_discards_windup);
     RUN_TEST(test_speed_average_over_window);
     RUN_TEST(test_speed_average_drops_samples_older_than_window);
