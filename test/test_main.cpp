@@ -806,8 +806,18 @@ void test_fault_blink_zero_pulses_stays_dark() {
     TEST_ASSERT_FALSE(fault_blink_on(0, 0, 120, 1000));
 }
 
+void test_fault_blink_shows_code_a_couple_of_times_then_stops() {
+    // 3 pulses (720ms) + 1000ms pause, 2 repeats: active until 720+1000+720 = 2440
+    TEST_ASSERT_TRUE(fault_blink_active(0, 3, 120, 1000, 2));
+    TEST_ASSERT_TRUE(fault_blink_active(2439, 3, 120, 1000, 2));
+    TEST_ASSERT_FALSE(fault_blink_active(2440, 3, 120, 1000, 2));
+    TEST_ASSERT_TRUE(fault_blink_on(1720, 3, 120, 1000));            // second showing
+    TEST_ASSERT_FALSE(fault_blink_on(1720 + 1000 + 10, 3, 120, 1000)); // would repeat, but only on within active window
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_fault_blink_shows_code_a_couple_of_times_then_stops);
     RUN_TEST(test_led_fault_none_when_everything_is_normal);
     RUN_TEST(test_led_fault_priority);
     RUN_TEST(test_fault_blink_pattern_pulses_then_pause);

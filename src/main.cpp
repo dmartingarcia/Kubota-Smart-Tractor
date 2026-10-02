@@ -126,6 +126,7 @@ void updateWifi(unsigned long currentMillis) {
 #define BOOT_BLINK_COUNT              3
 #define FAULT_BLINK_HALF_PERIOD_MS    120   // fault code: N quick pulses (see StatusLed.h), then FAULT_BLINK_PAUSE_MS dark
 #define FAULT_BLINK_PAUSE_MS          1000
+#define FAULT_BLINK_REPEATS           5     // show each new fault code this many times, then hand the LED back
 #define LED_ACTIVE_LOW                true // Wemos D1 Mini on-board LED lights when D4 is LOW
 #define ENGINE_PROBE_PULSE_MS         3000  // hold full output this long before checking for a voltage rise
 #define ENGINE_PROBE_COOLDOWN_MS      8000  // wait this long before the next pulse if the engine looks off
@@ -423,14 +424,19 @@ void loop() {
   if(bootBlinkDone) {
     static LedFault shownFault = LedFault::NONE;
     static unsigned long faultStart = 0;
+    static bool faultLedOwned = false;
     LedFault fault = decide_led_fault(current_voltage, overvoltage_alert, ESP.getFreeHeap());
-    if(fault != LedFault::NONE) {
-      if(fault != shownFault) faultStart = currentMillis; // restart the pattern on a new code
+    if(fault != shownFault) faultStart = currentMillis; // new code (or cleared): restart the pattern
+    unsigned long faultElapsed = currentMillis - faultStart;
+    int pulses = static_cast<int>(fault);
+    if(fault != LedFault::NONE &&
+       fault_blink_active(faultElapsed, pulses, FAULT_BLINK_HALF_PERIOD_MS, FAULT_BLINK_PAUSE_MS, FAULT_BLINK_REPEATS)) {
       alternator.setMirrorEnabled(false);
-      alternator.writeMirrorRaw(fault_blink_on(currentMillis - faultStart, static_cast<int>(fault),
-                                               FAULT_BLINK_HALF_PERIOD_MS, FAULT_BLINK_PAUSE_MS));
-    } else if(shownFault != LedFault::NONE) {
-      alternator.setMirrorEnabled(true);
+      alternator.writeMirrorRaw(fault_blink_on(faultElapsed, pulses, FAULT_BLINK_HALF_PERIOD_MS, FAULT_BLINK_PAUSE_MS));
+      faultLedOwned = true;
+    } else if(faultLedOwned) {
+      alternator.setMirrorEnabled(true); // shown enough (or cleared): back to mirroring the output
+      faultLedOwned = false;
     }
     shownFault = fault;
   }

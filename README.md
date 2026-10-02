@@ -278,7 +278,8 @@ cooldown, full during a probe pulse/`MAX_CHARGE`, proportional while the PID run
 brightness still follows the output; set it to `false` for an external active-high LED.
 On power-on the LED blinks 3 times (200ms on/off, `BOOT_BLINK_*`) to show the board is alive, then switches to mirroring the output.
 If something is wrong the LED shows a fault code instead of mirroring the output: N quick pulses,
-a 1s pause, repeat. It goes back to mirroring the output as soon as the fault clears.
+a 1s pause, shown 5 times (`FAULT_BLINK_REPEATS`), then it goes back to mirroring the output even
+if the fault persists. A different fault, or the same one reappearing after it cleared, is shown again.
 
 | Pulses | Fault |
 |---|---|

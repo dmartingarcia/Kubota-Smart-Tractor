@@ -14,3 +14,10 @@ bool fault_blink_on(unsigned long elapsedMs, int pulses, unsigned long halfPerio
   if (t >= pulsesSpan) return false; // pause between repeats
   return (t % (2UL * halfPeriodMs)) < halfPeriodMs;
 }
+
+bool fault_blink_active(unsigned long elapsedMs, int pulses, unsigned long halfPeriodMs, unsigned long pauseMs, int repeats) {
+  if (pulses <= 0 || repeats <= 0) return false;
+  unsigned long pulsesSpan = 2UL * halfPeriodMs * static_cast<unsigned long>(pulses);
+  unsigned long total = static_cast<unsigned long>(repeats) * (pulsesSpan + pauseMs) - pauseMs;
+  return elapsedMs < total;
+}

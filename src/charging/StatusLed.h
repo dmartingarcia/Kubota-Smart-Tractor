@@ -22,4 +22,8 @@ LedFault decide_led_fault(float voltage, bool overvoltageAlert, uint32_t freeHea
 // `pulses` blinks of halfPeriodMs on / halfPeriodMs off, then pauseMs dark, repeating.
 bool fault_blink_on(unsigned long elapsedMs, int pulses, unsigned long halfPeriodMs, unsigned long pauseMs);
 
+// Whether the code is still being shown: `repeats` showings of the pattern, then the LED is
+// handed back (the fault may persist - it was already shown, no need to keep flashing).
+bool fault_blink_active(unsigned long elapsedMs, int pulses, unsigned long halfPeriodMs, unsigned long pauseMs, int repeats);
+
 #endif
