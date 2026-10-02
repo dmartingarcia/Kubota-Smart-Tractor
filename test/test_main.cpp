@@ -295,6 +295,15 @@ void test_mirror_duty_clamps_overrange() {
     TEST_ASSERT_EQUAL_UINT16(0, mirror_duty(2000, 1023, true));
 }
 
+void test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own() {
+    EngineDetector detector(2000, 60000, 0.3);
+    detector.update(12.5, 0);
+    detector.update(12.5, 2000);                      // dry pulse -> cooldown, baseline 12.5
+    TEST_ASSERT_FALSE(detector.update(12.6, 5000));   // small drift, still cooling down
+    TEST_ASSERT_TRUE(detector.update(12.9, 6000));    // +0.4V with no drive: engine started -> probe now
+    TEST_ASSERT_TRUE(detector.isProbing());
+}
+
 // Test-only fake store: in-memory blob, no real flash.
 class InMemoryFlashStore : public IFlashStore {
   public:
@@ -569,6 +578,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_engine_detector_grace_keeps_running_through_voltage_sag);
     RUN_TEST(test_engine_detector_grace_expires_into_probe);
     RUN_TEST(test_engine_detector_reset_drops_grace);
+    RUN_TEST(test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own);
     RUN_TEST(test_median_reading_rejects_spike);
     RUN_TEST(test_mirror_duty_follows_output_exactly);
     RUN_TEST(test_mirror_duty_inverts_for_active_low_led);

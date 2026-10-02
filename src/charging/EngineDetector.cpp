@@ -34,7 +34,8 @@ bool EngineDetector::update(float voltage, unsigned long currentMillis) {
   }
 
   if (phase_ == Phase::COOLDOWN) {
-    if (currentMillis - phaseStartMillis_ < cooldownMs_) { probing_ = false; return false; }
+    bool voltageRoseOnItsOwn = voltage - baselineVoltage_ >= voltageRiseVolts_;
+    if (!voltageRoseOnItsOwn && currentMillis - phaseStartMillis_ < cooldownMs_) { probing_ = false; return false; }
     phase_ = Phase::PULSING;
     phaseStartMillis_ = currentMillis;
     baselineVoltage_ = voltage;
@@ -56,6 +57,7 @@ bool EngineDetector::update(float voltage, unsigned long currentMillis) {
   probing_ = false;
   phase_ = Phase::COOLDOWN;
   phaseStartMillis_ = currentMillis;
+  baselineVoltage_ = voltage; // cooldown watches for a rise from here, to end early
   return false;
 }
 

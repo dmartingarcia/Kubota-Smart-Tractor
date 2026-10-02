@@ -119,9 +119,9 @@ void updateWifi(unsigned long currentMillis) {
 #define USE_PWM                       true
 #define MAX_CHARGE_CURRENT_PWM        1023 // matches analogWriteRange in OutputComponent
 #define LED_ACTIVE_LOW                true // Wemos D1 Mini on-board LED lights when D4 is LOW
-#define ENGINE_PROBE_PULSE_MS         2000  // hold full output this long before checking for a voltage rise
-#define ENGINE_PROBE_COOLDOWN_MS      60000 // wait this long before the next pulse if the engine looks off
-#define ENGINE_PROBE_RISE_VOLTS       0.3   // minimum voltage rise during a pulse to call the engine running
+#define ENGINE_PROBE_PULSE_MS         3000  // hold full output this long before checking for a voltage rise
+#define ENGINE_PROBE_COOLDOWN_MS      8000  // wait this long before the next pulse if the engine looks off
+#define ENGINE_PROBE_RISE_VOLTS       0.15  // minimum voltage rise during a pulse to call the engine running
 #define ENGINE_RUNNING_GRACE_MS       15000 // after seeing the engine charging, ride out voltage sags this long before probing
 
 // PID Configuration
