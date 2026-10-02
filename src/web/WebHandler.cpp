@@ -28,6 +28,8 @@ extern bool engine_running;
 extern bool engine_probing;
 extern bool overvoltage_alert;
 extern bool wifiConnectedSta;
+extern int staAttempts;
+extern int staLastFailStatus;
 extern unsigned long maxLoopDurationUs;
 extern MqttPublisher mqttPublisher;
 extern const char* mqtt_host;
@@ -79,7 +81,7 @@ void setupWebServer() {
 }
 
 void handleRoot() {
-  String html = R"=====(
+  static const char kDashboardHtml[] PROGMEM = R"=====(
   <!DOCTYPE html>
   <html>
   <head>
@@ -196,6 +198,7 @@ void handleRoot() {
       <div class="card">
         <h2>Connectivity</h2>
         <div class="row"><span class="label">WiFi</span><span class="pill" id="wifiMode">--</span></div>
+        <div class="row"><span class="label">Home WiFi attempts</span><span class="value" id="staInfo">--</span></div>
         <div class="note">Home Assistant/MQTT only reachable while on home WiFi (STA); AP fallback is offline-only.</div>
       </div>
 
@@ -296,6 +299,9 @@ void handleRoot() {
 
       function updateConnectivity(data) {
         setPill('wifiMode', Components.wifiMode(data.wifiMode));
+        const STA_FAIL = { 1: 'network not found', 4: 'connection failed (wrong password?)', 6: 'disconnected / rejected' };
+        setText('staInfo', data.staAttempts + (data.staLastFail >= 0 && data.wifiMode !== 'sta'
+          ? ' - last: ' + (STA_FAIL[data.staLastFail] || 'status ' + data.staLastFail) : ''));
       }
 
       function updateMqtt(data) {
@@ -507,7 +513,7 @@ void handleRoot() {
   </html>
   )=====";
 
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", kDashboardHtml);
 }
 
 void handleData() {
@@ -534,6 +540,8 @@ void handleData() {
   }
 
   doc["wifiMode"] = wifiConnectedSta ? "sta" : "ap_fallback";
+  doc["staAttempts"] = staAttempts;
+  doc["staLastFail"] = staLastFailStatus;
 
   doc["autotuneActive"] = autotuneActive;
   doc["runHours"] = usageCounters.totalRunSeconds() / 3600.0;
@@ -621,7 +629,7 @@ void handleMaintenanceInterval() {
 }
 
 void handleMaintenancePage() {
-  String html = R"=====(
+  static const char kMaintenanceHtml[] PROGMEM = R"=====(
   <!DOCTYPE html>
   <html>
   <head>
@@ -702,7 +710,7 @@ void handleMaintenancePage() {
   </html>
   )=====";
 
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", kMaintenanceHtml);
 }
 
 void handleMaintenanceLogList() {

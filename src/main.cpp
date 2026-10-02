@@ -47,6 +47,10 @@ bool wifiConnectedSta = false;
 bool staAttemptInProgress = false;
 unsigned long staAttemptDeadline = 0;
 unsigned long nextStaAttempt = 0;
+// Diagnostics for the dashboard (no USB needed): how many STA attempts, and why the last one
+// failed - WiFi.status(): 1 SSID not found, 4 connect failed (wrong password?), 6 disconnected.
+int staAttempts = 0;
+int staLastFailStatus = -1;
 
 // Captive portal: redirects any DNS lookup from an AP client back to our own IP, so
 // the phone's connectivity probe fails/redirects and it auto-shows the sign-in page.
@@ -74,6 +78,7 @@ void updateWifi(unsigned long currentMillis) {
       Serial.println("STA connected");
     } else if (currentMillis - staAttemptDeadline < (1UL << 31)) { // deadline reached (non-wrapping compare)
       staAttemptInProgress = false;
+      staLastFailStatus = WiFi.status();
       startAP(); // STA attempt used the radio exclusively - bring the AP back
       nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS;
       Serial.println("STA connection failed, back to AP");
@@ -101,6 +106,7 @@ void updateWifi(unsigned long currentMillis) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(sta_ssid, sta_password);
     staAttemptInProgress = true;
+    staAttempts++;
     staAttemptDeadline = currentMillis + STA_CONNECT_TIMEOUT_MS;
     Serial.println("Trying STA...");
   }
@@ -112,7 +118,7 @@ void updateWifi(unsigned long currentMillis) {
 #define VOLTAGE_THRESHOLD_HIGH        14.4
 #define VOLTAGE_THRESHOLD_LOW         13.0
 #define INPUT_VOLTAGE                 A0
-#define SAMPLES                       9
+#define SAMPLES                       5
 #define LED_PIN                       D4
 #define RELAY_PIN                     D3
 #define GPS_RX_PIN                    D5 // ESP8266 RX, wired to the GPS module's TX
