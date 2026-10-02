@@ -12,6 +12,8 @@
 #include "../src/gps/GpsJumpFilter.h"
 #include "../src/gps/SpeedAverager.h"
 #include <string.h>
+#include <string>
+#include <vector>
 
 void setUp() {}
 void tearDown() {}
@@ -360,13 +362,15 @@ void test_usage_counters_maintenance_due() {
     TEST_ASSERT_TRUE(counters.isMaintenanceDue());
 }
 
-// Test-only fake MQTT transport: no real network.
+// Test-only fake MQTT transport: no real network, records every publish.
+struct SentMessage { std::string topic; std::string payload; bool retain; };
 class FakeMqttTransport : public IMqttTransport {
   public:
     bool connectedState = false;
     bool connectResult = true;
     int connectCalls = 0;
     int publishCalls = 0;
+    std::vector<SentMessage> sent;
 
     bool connected() override { return connectedState; }
     bool connect() override {
@@ -374,11 +378,27 @@ class FakeMqttTransport : public IMqttTransport {
         connectedState = connectResult;
         return connectResult;
     }
-    bool publish(const char*, const char*, bool) override {
+    bool publish(const char* topic, const char* payload, bool retain) override {
         publishCalls++;
+        sent.push_back({topic, payload, retain});
         return true;
     }
     void loop() override {}
+
+    int countTopic(const char* topic) const {
+        int n = 0;
+        for (const auto& m : sent) if (m.topic == topic) n++;
+        return n;
+    }
+    const SentMessage* lastOn(const char* topic) const {
+        for (size_t i = sent.size(); i-- > 0;) if (sent[i].topic == topic) return &sent[i];
+        return nullptr;
+    }
+    int discoveryCount() const {
+        int n = 0;
+        for (const auto& m : sent) if (m.topic.rfind("homeassistant/", 0) == 0) n++;
+        return n;
+    }
 };
 
 MqttReading make_reading(unsigned long ts) {
@@ -419,12 +439,13 @@ void test_mqtt_flushes_buffer_and_publishes_on_reconnect() {
     pub.update(true, 100); // now connected: discovery + batch(1)
     TEST_ASSERT_EQUAL(0, static_cast<int>(pub.bufferedCount()));
     TEST_ASSERT_EQUAL(1, pub.publishCount());
-    TEST_ASSERT_EQUAL(7, t.publishCalls); // 6 discovery configs + 1 batch publish
+    TEST_ASSERT_EQUAL(10, t.discoveryCount());
+    TEST_ASSERT_EQUAL(12, t.publishCalls); // 10 discovery configs + 1 state + 1 history batch
 
     pub.recordSample(make_reading(200));
     pub.update(true, 200); // already connected, discovery not repeated
     TEST_ASSERT_EQUAL(2, pub.publishCount());
-    TEST_ASSERT_EQUAL(8, t.publishCalls);
+    TEST_ASSERT_EQUAL(14, t.publishCalls); // + state + history batch, discovery not repeated
 }
 
 void test_mqtt_buffer_drops_oldest_when_full() {
@@ -434,6 +455,123 @@ void test_mqtt_buffer_drops_oldest_when_full() {
     pub.recordSample(make_reading(2));
     pub.recordSample(make_reading(3)); // drops reading #1
     TEST_ASSERT_EQUAL(2, static_cast<int>(pub.bufferedCount()));
+}
+
+
+MqttReading make_reading_v(unsigned long ts, float volts) {
+    MqttReading r = make_reading(ts);
+    r.voltage = volts;
+    return r;
+}
+
+void test_mqtt_state_topic_is_latest_reading_even_with_backlog() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    for (int i = 0; i < 20; i++) pub.recordSample(make_reading_v(1000UL * i, 12.0f + i * 0.1f)); // 20 buffered, last is 13.90V
+    pub.update(true, 100000);
+
+    const SentMessage* state = t.lastOn("kubotio/tractor/state");
+    TEST_ASSERT_NOT_NULL(state);
+    TEST_ASSERT_TRUE(state->retain);
+    TEST_ASSERT_EQUAL_CHAR('{', state->payload[0]);                       // one object, not an array
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"voltage\":13.90")); // newest, not oldest
+}
+
+void test_mqtt_history_topic_drains_oldest_first_in_capped_batches() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    for (int i = 0; i < 20; i++) pub.recordSample(make_reading_v(1000UL * i, 12.0f));
+    pub.update(true, 100000);
+    TEST_ASSERT_EQUAL(8, pub.publishCount()); // kMaxPerBatch
+    const SentMessage* hist = t.lastOn("kubotio/tractor/history");
+    TEST_ASSERT_NOT_NULL(hist);
+    TEST_ASSERT_FALSE(hist->retain);
+    TEST_ASSERT_EQUAL_CHAR('[', hist->payload[0]);
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist->payload.find("\"timestamp\":0,"));    // oldest first
+    TEST_ASSERT_EQUAL(std::string::npos, hist->payload.find("\"timestamp\":8000,"));     // 9th waits for the next cycle
+}
+
+void test_mqtt_state_not_republished_without_new_sample() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    for (int i = 0; i < 20; i++) pub.recordSample(make_reading(1000UL * i));
+    pub.update(true, 100000);
+    pub.update(true, 130000); // no new sample, backlog still draining
+    TEST_ASSERT_EQUAL(1, t.countTopic("kubotio/tractor/state"));
+    TEST_ASSERT_EQUAL(2, t.countTopic("kubotio/tractor/history"));
+}
+
+void test_mqtt_gps_topic_only_with_fix_and_carries_position() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+
+    pub.recordSample(make_reading(0));
+    pub.update(true, 1000);
+    TEST_ASSERT_EQUAL(0, t.countTopic("kubotio/tractor/gps")); // default live state: no fix
+
+    MqttLiveState live{};
+    live.gpsHasFix = true; live.latitude = 41.123456; live.longitude = 2.654321;
+    live.speedKmh = 7.5f; live.speedAvgKmh = 6.0f; live.engineProbing = true; live.engineSources = 6;
+    pub.setLiveState(live);
+    pub.recordSample(make_reading(10000));
+    pub.update(true, 11000);
+
+    const SentMessage* gps = t.lastOn("kubotio/tractor/gps");
+    TEST_ASSERT_NOT_NULL(gps);
+    TEST_ASSERT_TRUE(gps->retain);
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, gps->payload.find("\"latitude\":41.123456"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, gps->payload.find("\"longitude\":2.654321"));
+
+    const SentMessage* state = t.lastOn("kubotio/tractor/state");
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"gpsSpeedKmh\":7.5"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"engineProbing\":true"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"engineSources\":6"));
+}
+
+void test_mqtt_readings_carry_epoch_when_known() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    MqttReading r = make_reading(0);
+    r.epochSeconds = 1780000000;
+    pub.recordSample(r);
+    pub.update(true, 1000);
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, t.lastOn("kubotio/tractor/state")->payload.find("\"epoch\":1780000000"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, t.lastOn("kubotio/tractor/history")->payload.find("\"epoch\":1780000000"));
+}
+
+void test_mqtt_discovery_entities_read_the_state_object() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 5, 30000);
+    pub.recordSample(make_reading(0));
+    pub.update(true, 0);
+    int stateEntities = 0;
+    for (const auto& m : t.sent) {
+        if (m.topic.rfind("homeassistant/", 0) != 0) continue;
+        TEST_ASSERT_TRUE(m.retain);
+        TEST_ASSERT_EQUAL(std::string::npos, m.payload.find("[-1]")); // no more array indexing
+        if (m.payload.find("\"state_topic\":\"kubotio/tractor/state\"") != std::string::npos) stateEntities++;
+    }
+    TEST_ASSERT_EQUAL(9, stateEntities);                                   // 9 sensors on the state topic
+    TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/device_tracker/kubotio_tractor/config"));
+    TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/binary_sensor/kubotio_engine_running/config"));
+    TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/sensor/kubotio_gps_speed/config"));
+}
+
+void test_mqtt_worst_case_batch_fits_transport_buffer() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    MqttReading r{4294967295UL, 14.40f, 1023, 100, false, false, 4000000000UL, false, 81920, false, 4294967295UL};
+    for (int i = 0; i < 20; i++) pub.recordSample(r);
+    pub.update(true, 1);
+    TEST_ASSERT_TRUE(t.lastOn("kubotio/tractor/history")->payload.size() < 2100);
+    TEST_ASSERT_EQUAL(8, pub.publishCount());
 }
 
 void test_gps_jump_filter_accepts_first_fix() {
@@ -678,6 +816,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_mqtt_throttles_reconnect_attempts);
     RUN_TEST(test_mqtt_flushes_buffer_and_publishes_on_reconnect);
     RUN_TEST(test_mqtt_buffer_drops_oldest_when_full);
+    RUN_TEST(test_mqtt_state_topic_is_latest_reading_even_with_backlog);
+    RUN_TEST(test_mqtt_history_topic_drains_oldest_first_in_capped_batches);
+    RUN_TEST(test_mqtt_state_not_republished_without_new_sample);
+    RUN_TEST(test_mqtt_gps_topic_only_with_fix_and_carries_position);
+    RUN_TEST(test_mqtt_readings_carry_epoch_when_known);
+    RUN_TEST(test_mqtt_discovery_entities_read_the_state_object);
+    RUN_TEST(test_mqtt_worst_case_batch_fits_transport_buffer);
     RUN_TEST(test_gps_jump_filter_accepts_first_fix);
     RUN_TEST(test_gps_jump_filter_accepts_plausible_movement);
     RUN_TEST(test_gps_jump_filter_rejects_impossible_jump);

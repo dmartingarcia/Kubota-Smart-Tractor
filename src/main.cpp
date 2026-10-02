@@ -212,6 +212,12 @@ unsigned long overvoltageAlertMillis = 0;
 unsigned long maxLoopDurationUs = 0; // high-water mark, reset every store_data() cycle
 bool lastEngineRunning = false; // edge-detects engine shutdown to force an immediate save
 
+// NTP wall-clock seconds, 0 until synced (before ~2023 time() is near zero).
+uint32_t epochOrZero() {
+  time_t now = time(nullptr);
+  return now >= 1700000000 ? static_cast<uint32_t>(now) : 0;
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -438,8 +444,12 @@ void loop() {
       lastMqttSample = currentMillis;
       MqttReading reading{currentMillis, current_voltage, alternator.getPWM(), alternator.getPWMPercent(),
                           alternator.isActive(), engine_running, usageCounters.totalRunSeconds(),
-                          usageCounters.isMaintenanceDue(), ESP.getFreeHeap(), overvoltage_alert};
+                          usageCounters.isMaintenanceDue(), ESP.getFreeHeap(), overvoltage_alert, epochOrZero()};
       mqttPublisher.recordSample(reading);
+      mqttPublisher.setLiveState(MqttLiveState{gpsHasAcceptedFix, gpsJumpFilter.lastLat(), gpsJumpFilter.lastLon(),
+                                               static_cast<float>(gpsReader.speedKmh()),
+                                               static_cast<float>(gpsSpeedAvg.average(currentMillis)),
+                                               engine_probing, engineModeSettings.sources()});
     }
 
     if(currentMillis - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {

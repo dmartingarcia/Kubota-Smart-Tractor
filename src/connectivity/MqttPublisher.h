@@ -26,27 +26,42 @@ struct MqttReading {
   bool maintenanceDue;
   uint32_t freeHeap;
   bool overvoltageAlert;
+  uint32_t epochSeconds; // wall-clock time (NTP), 0 when unknown
+};
+
+// Latest-only extras for the state topic: not buffered (RAM), so they are never history.
+struct MqttLiveState {
+  bool gpsHasFix;
+  double latitude;
+  double longitude;
+  float speedKmh;
+  float speedAvgKmh;
+  bool engineProbing;
+  uint8_t engineSources;
 };
 
 // Publishes telemetry to MQTT/Home Assistant. Sampling and publishing are decoupled
 // on purpose: recordSample() buffers a reading (call it often, e.g. every 10s, for
-// good resolution even while offline), update() attempts to actually send whatever's
-// buffered as a single batched JSON array (call it less often, e.g. every 30s, so a
-// healthy connection isn't spammed with one MQTT message per sample). Buffers while
-// offline/disconnected and sends the backlog once connectivity is back
-// (store-and-forward), capped at kMaxPerBatch readings per publish() call so one
-// message can't balloon after a long outage - the rest just waits for the next
-// update() call. Publishes HA MQTT discovery configs once per (re)connect.
+// good resolution even while offline), update() sends (call it less often, e.g. every 30s).
+// Two channels per update():
+//   kubotio/tractor/state   - retained, ONE JSON object: the newest reading plus live extras
+//                             (GPS, engine state). What HA entities read, so after an outage
+//                             they show the present immediately, not the backlog.
+//   kubotio/tractor/gps     - retained lat/lon attributes for the HA device_tracker (fix only).
+//   kubotio/tractor/history - JSON array, oldest first, up to kMaxPerBatch readings per call:
+//                             store-and-forward of every sample (with epoch when known).
+// Publishes HA MQTT discovery configs once per (re)connect.
 // update() must stay cheap: reconnect attempts are throttled to reconnectIntervalMs,
 // since IMqttTransport::connect() can block briefly on a real socket.
 class MqttPublisher {
   public:
     static constexpr size_t kMaxBuffered = 180; // matches the capacity main.cpp actually passes
-    static constexpr size_t kMaxPerBatch = 10; // bounds a single publish() payload's size
+    static constexpr size_t kMaxPerBatch = 8;  // bounds a single publish() payload's size
 
     MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, unsigned long reconnectIntervalMs);
 
     void recordSample(const MqttReading& reading); // always buffers; call at the fast/sample cadence
+    void setLiveState(const MqttLiveState& live) { live_ = live; } // latest GPS/engine extras for the state topic
 
     // Call at the slower publish cadence: connects if needed (throttled), and if
     // connected, publishes up to kMaxPerBatch buffered readings as one batch.
@@ -78,9 +93,13 @@ class MqttPublisher {
     MqttReading lastPublished_;
     bool hasLastPublished_;
     unsigned long lastPublishMillis_;
+    MqttReading latest_;
+    bool latestDirty_;
+    MqttLiveState live_;
 
     void enqueue(const MqttReading& r);
-    void publishBatch(unsigned long currentMillis);
+    void publishState(unsigned long currentMillis);
+    void publishBatch();
     void publishDiscovery();
 };
 

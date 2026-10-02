@@ -219,15 +219,20 @@ it yet).
   while a STA connection is up; it's offline-only while sitting on the AP.
 - Set `mqtt_host` in `secrets.h` to enable; leave it empty to disable MQTT entirely.
 - **Sampling and publishing are decoupled:** a reading is sampled (buffered) every
-  10s (`MQTT_SAMPLE_INTERVAL_MS`) regardless of connectivity, giving good resolution
-  even while offline; the buffer is actually sent every 30s (`MQTT_PUBLISH_INTERVAL_MS`),
-  as one batched JSON array (capped at 10 readings per MQTT message -
-  `MqttPublisher::kMaxPerBatch` - so a long outage's backlog drains over a few publish
-  cycles instead of one huge message). Buffer holds up to 30 minutes of samples
-  (`MqttPublisher::kMaxBuffered = 180`).
-- HA MQTT discovery configs are published on (re)connect (voltage, PWM%, charging
-  hours, maintenance-due, free heap, overvoltage alert). Since the state payload is
-  now an array, templates read the last element: `{{ value_json[-1].voltage }}`.
+  10s (`MQTT_SAMPLE_INTERVAL_MS`) regardless of connectivity; every 30s
+  (`MQTT_PUBLISH_INTERVAL_MS`) the device publishes on three topics. Buffer holds up
+  to 30 minutes of samples (`MqttPublisher::kMaxBuffered = 180`).
+
+| Topic | Retained | Content |
+|---|---|---|
+| `kubotio/tractor/state` | yes | ONE JSON object: the newest reading plus engine state (`engineRunning`, `engineProbing`, `engineSources`) and GPS (`gpsFix`, `gpsSpeedKmh`, `gpsSpeedAvgKmh`). What HA entities read, so after an outage they show the present immediately. Only sent when there is a new sample |
+| `kubotio/tractor/gps` | yes | `latitude`/`longitude`/`gps_accuracy` attributes for the HA device tracker, only while there's a fix |
+| `kubotio/tractor/history` | no | JSON array, oldest first, up to 8 readings per publish (`MqttPublisher::kMaxPerBatch`): store-and-forward of every sample, each with `epoch` (NTP wall-clock seconds, `0` if not synced) |
+
+- HA MQTT discovery configs are published on (re)connect: voltage, PWM%, charging hours,
+  free heap, speed, maintenance due, overvoltage, engine running, charging active, and a
+  device tracker. Entities use `expire_after: 180` so they go unavailable if the device
+  stops publishing instead of showing a stale retained value.
 - Dashboard has a "test connection" button (`/mqtt/test`, forces an immediate
   reconnect attempt) and shows the last-published reading + how long ago.
 - **Known limitation:** the underlying MQTT client's `connect()` can still block
