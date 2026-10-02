@@ -64,23 +64,49 @@ void handleRoot() {
       :root {
         --bg: #f8f9fa; --card: #ffffff; --text: #2c3e50; --label: #6c757d;
         --border: #e9ecef; --accent: #007bff; --good: #28a745; --warn: #ffc107; --bad: #dc3545;
+        --h2: #495057; --grid: #e9ecef; --shadow: rgba(0,0,0,0.08);
+        --pill-good-bg: #d4edda; --pill-good-fg: #155724; --pill-bad-bg: #f8d7da; --pill-bad-fg: #721c24;
+        --pill-warn-bg: #fff3cd; --pill-warn-fg: #856404;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #12161b; --card: #1c222a; --text: #e6e9ed; --label: #93a0ad; --border: #2c343e;
+          --accent: #4da3ff; --good: #3ddc84; --warn: #ffca3a; --bad: #ff6b6b;
+          --h2: #b8c2cc; --grid: #2c343e; --shadow: rgba(0,0,0,0.4);
+          --pill-good-bg: #12351f; --pill-good-fg: #7ee2a8; --pill-bad-bg: #3d1a1d; --pill-bad-fg: #ff9aa2;
+          --pill-warn-bg: #3b3012; --pill-warn-fg: #ffd966;
+          color-scheme: dark;
+        }
       }
       * { box-sizing: border-box; min-width: 0; }
       html, body { max-width: 100%; overflow-x: hidden; }
       body { font-family: -apple-system, Arial, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: var(--text); }
       h1 { font-size: 1.4em; margin: 0 0 16px; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
-      .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
-      .card h2 { font-size: 1em; margin: 0 0 12px; color: #495057; }
+      .card { background: var(--card); border-radius: 10px; padding: 16px; box-shadow: 0 2px 4px var(--shadow); }
+      .card h2 { font-size: 1em; margin: 0 0 12px; color: var(--h2); }
       .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: 4px 0; gap: 4px; }
       .label { color: var(--label); font-size: 0.9em; }
       .value { font-weight: 600; }
       .pill { padding: 3px 10px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
-      .pill-good { background: #d4edda; color: #155724; }
-      .pill-bad { background: #f8d7da; color: #721c24; }
-      .pill-warn { background: #fff3cd; color: #856404; }
+      .pill-good { background: var(--pill-good-bg); color: var(--pill-good-fg); }
+      .pill-bad { background: var(--pill-bad-bg); color: var(--pill-bad-fg); }
+      .pill-warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+      .hero { text-align: center; padding: 4px 0 12px; }
+      .hero .big { font-size: 2.6em; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+      .hero .sub { color: var(--label); font-size: 0.85em; }
+      .v-good { color: var(--good); } .v-warn { color: var(--warn); } .v-bad { color: var(--bad); }
+      .banner { padding: 10px 14px; border-radius: 8px; margin: 0 0 12px; font-weight: 600; font-size: 0.9em; }
+      .banner-bad { background: var(--pill-bad-bg); color: var(--pill-bad-fg); }
+      .banner-warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+      .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .head h1 { margin: 0; }
+      #updated { font-size: 0.8em; color: var(--label); }
+      button:active { transform: scale(0.97); }
       .bar { width: 100%; height: 16px; background: var(--border); border-radius: 8px; overflow: hidden; margin: 6px 0; }
       .bar-fill { height: 100%; background: var(--accent); transition: width 0.4s ease; }
+      a { color: var(--accent); }
       button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-size: 0.9em; cursor: pointer; }
       button:disabled { background: #adb5bd; cursor: default; }
       button.secondary { background: #6c757d; }
@@ -97,17 +123,19 @@ void handleRoot() {
     </style>
   </head>
   <body>
-    <h1>Tractor Battery Monitor</h1>
+    <div class="head"><h1>Tractor Battery Monitor</h1><span id="updated">connecting...</span></div>
+    <div id="offlineBanner" class="banner banner-bad" style="display:none;">Connection to device lost - retrying...</div>
+    <div id="dueBanner" class="banner banner-warn" style="display:none;">&#128295; Maintenance due - <a href="/maintenance">open logbook</a></div>
+    <div id="overvoltageBanner" class="banner banner-bad" style="display:none;">&#9888;&#65039; Overvoltage cutoff active - alternator forced off</div>
     <div class="grid">
 
       <div class="card">
         <h2>Charging Status</h2>
-        <div class="row"><span class="label">Voltage</span><span class="value" id="voltage">--</span></div>
+        <div class="hero"><div class="big" id="voltage">--</div><div class="sub">Battery voltage</div></div>
         <div class="row"><span class="label">Mode</span><span class="value" id="outputMode">--</span></div>
         <div class="bar" id="pwmBar" style="display:none;"><div class="bar-fill" id="pwmFill" style="width:0%;"></div></div>
         <div class="row" id="pwmRow" style="display:none;"><span class="label">PWM</span><span class="value" id="pwmValue">0%</span></div>
         <div class="row"><span class="label">Engine</span><span class="pill" id="engineStatus">--</span></div>
-        <div class="row" id="overvoltageRow" style="display:none;"><span class="label">⚠️ Overvoltage cutoff</span><span class="pill pill-bad">ACTIVE</span></div>
       </div>
 
       <div class="card">
@@ -180,6 +208,7 @@ void handleRoot() {
       // description of the UI instead of a wall of DOM calls. ---
       const Fmt = {
         volts: v => v.toFixed(2) + ' V',
+        ago: s => s < 60 ? s + 's ago' : Math.floor(s / 60) + 'min ago',
         hours: h => h.toFixed(1) + ' h',
         percent: p => p + '%',
       };
@@ -204,8 +233,14 @@ void handleRoot() {
         el.className = 'pill ' + cls;
       }
 
+      // Same thresholds as firmware (VOLTAGE_THRESHOLD_LOW/HIGH).
+      const V_LOW = 13.0, V_HIGH = 14.4;
+      function voltageClass(v) { return v >= V_HIGH ? 'v-bad' : v >= V_LOW ? 'v-good' : v >= 12.0 ? 'v-warn' : 'v-bad'; }
+      function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
       function updateChargingStatus(data) {
         setText('voltage', Fmt.volts(data.voltage));
+        document.getElementById('voltage').className = 'big ' + voltageClass(data.voltage);
 
         const isPWM = data.outputMode === 'pwm';
         setText('outputMode', isPWM ? 'PWM' : 'RELAY');
@@ -217,7 +252,7 @@ void handleRoot() {
         }
 
         setPill('engineStatus', Components.engineStatus(data.engineRunning, data.engineProbing));
-        document.getElementById('overvoltageRow').style.display = data.overvoltageAlert ? 'flex' : 'none';
+        document.getElementById('overvoltageBanner').style.display = data.overvoltageAlert ? 'block' : 'none';
       }
 
       function updateConnectivity(data) {
@@ -228,7 +263,7 @@ void handleRoot() {
         setPill('mqttStatus', data.mqttConnected
           ? { text: 'connected', cls: 'pill-good' } : { text: 'disconnected', cls: 'pill-bad' });
         setText('mqttLastSent', data.mqttHasLastPublish
-          ? Fmt.volts(data.mqttLastVoltage) + ', ' + data.mqttLastPwmPercent + '% PWM (' + data.mqttLastSentAgoS + 's ago)'
+          ? Fmt.volts(data.mqttLastVoltage) + ', ' + data.mqttLastPwmPercent + '% PWM (' + Fmt.ago(data.mqttLastSentAgoS) + ')'
           : 'never');
       }
 
@@ -263,6 +298,7 @@ void handleRoot() {
           document.getElementById('intervalInput').value = data.serviceIntervalHours;
         }
         setPill('maintenanceDue', Components.maintenanceDue(data.maintenanceDue));
+        document.getElementById('dueBanner').style.display = data.maintenanceDue ? 'block' : 'none';
       }
 
       const TOTAL_HEAP_BYTES = 81920; // ESP8266 total RAM
@@ -303,8 +339,9 @@ void handleRoot() {
         const xFor = t => padL + (t1 === t0 ? 0 : (t - t0) / (t1 - t0) * w);
         const yFor = v => padT + h - ((Math.min(Math.max(v, minV), maxV) - minV) / (maxV - minV)) * h;
 
-        ctx.strokeStyle = '#e9ecef';
-        ctx.fillStyle = '#6c757d';
+        const gridColor = cssVar('--grid'), labelColor = cssVar('--label'), accent = cssVar('--accent');
+        ctx.strokeStyle = gridColor;
+        ctx.fillStyle = labelColor;
         ctx.font = '11px sans-serif';
         ctx.lineWidth = 1;
         for (let v = minV; v <= maxV; v++) {
@@ -313,20 +350,36 @@ void handleRoot() {
           ctx.fillText(v + 'V', 2, y + 4);
         }
 
+        // Safe-band shading + firmware thresholds (13.0V low / 14.4V high cutoff).
+        ctx.fillStyle = 'rgba(40,167,69,0.08)';
+        ctx.fillRect(padL, yFor(V_HIGH), w, yFor(V_LOW) - yFor(V_HIGH));
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = cssVar('--bad');
+        ctx.beginPath(); ctx.moveTo(padL, yFor(V_HIGH)); ctx.lineTo(padL + w, yFor(V_HIGH)); ctx.stroke();
+        ctx.strokeStyle = cssVar('--warn');
+        ctx.beginPath(); ctx.moveTo(padL, yFor(V_LOW)); ctx.lineTo(padL + w, yFor(V_LOW)); ctx.stroke();
+        ctx.setLineDash([]);
+
         ctx.beginPath();
         points.forEach((p, i) => {
           const x = xFor(p.timestamp), y = yFor(p.voltage);
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         });
-        ctx.strokeStyle = '#007bff';
+        ctx.strokeStyle = accent;
         ctx.lineWidth = 2;
         ctx.stroke();
 
         ctx.lineTo(xFor(points[points.length - 1].timestamp), padT + h);
         ctx.lineTo(xFor(points[0].timestamp), padT + h);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(0,123,255,0.1)';
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = accent;
         ctx.fill();
+        ctx.globalAlpha = 1;
+
+        const last = points[points.length - 1];
+        ctx.beginPath(); ctx.arc(xFor(last.timestamp), yFor(last.voltage), 3.5, 0, 2 * Math.PI);
+        ctx.fillStyle = accent; ctx.fill();
       }
 
       async function fetchData() {
@@ -334,12 +387,16 @@ void handleRoot() {
           const [statusRes, historyRes] = await Promise.all([fetch('/data'), fetch('/history')]);
           updateStatus(await statusRes.json());
           drawChart(await historyRes.json());
+          document.getElementById('offlineBanner').style.display = 'none';
+          setText('updated', 'updated ' + new Date().toLocaleTimeString());
         } catch (error) {
           console.error('Update failed:', error);
+          document.getElementById('offlineBanner').style.display = 'block';
         }
       }
 
       async function startAutotune() {
+        if (!confirm('Start autotune? Charge output will swing for up to 3 minutes.')) return;
         await fetch('/autotune/start');
         fetchData();
       }
@@ -363,6 +420,11 @@ void handleRoot() {
       document.getElementById('pollInterval').value = localStorage.getItem('kubotio_poll_ms') || '5000';
       setPollInterval();
       window.addEventListener('resize', fetchData);
+      // Don't hammer the ESP8266 from a background tab.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { clearInterval(pollTimer); pollTimer = null; }
+        else { fetchData(); setPollInterval(); }
+      });
       fetchData();
     </script>
   </body>
