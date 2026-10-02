@@ -2,6 +2,7 @@
 #define OUTPUT_COMPONENT_H
 
 #include <Arduino.h>
+#include "PwmMirror.h"
 
 class OutputComponent {
   private:
@@ -13,6 +14,9 @@ class OutputComponent {
     int8_t mirrorPin;
     bool mirrorActiveLow;
     bool mirrorEnabled;
+    DutyLatch outLatch;
+    DutyLatch mirrorLatch;
+    void writeMirror(uint16_t duty);
 
     void write(uint16_t duty); // single choke point: output pin + mirror pin get the same duty
 

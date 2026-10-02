@@ -1224,8 +1224,48 @@ void test_recorder_read_is_a_consistent_window() {
     TEST_ASSERT_EQUAL(0, static_cast<int>(r.read(all.size(), window, 5)));   // past the end
 }
 
+void test_duty_latch_skips_unchanged_writes() {
+    DutyLatch latch;
+    TEST_ASSERT_TRUE(latch.changed(0));      // first write always goes through, even if it is 0
+    TEST_ASSERT_FALSE(latch.changed(0));
+    TEST_ASSERT_TRUE(latch.changed(512));
+    TEST_ASSERT_FALSE(latch.changed(512));
+    TEST_ASSERT_TRUE(latch.changed(0));
+}
+
+void test_duty_latch_invalidate_forces_next_write() {
+    DutyLatch latch;
+    latch.changed(300);
+    latch.invalidate();                      // e.g. something else took the pin in between
+    TEST_ASSERT_TRUE(latch.changed(300));
+}
+
+void test_mqtt_compact_storage_keeps_the_published_values() {
+    FakeMqttTransport t;
+    t.connectedState = true;
+    MqttPublisher pub(t, 50, 30000);
+    MqttReading r{123456UL, 14.37f, 777, 76, true, true, 7200, true, 22648, true, 1790944496UL};
+    pub.recordSample(r);
+    pub.update(true, 1);
+    const std::string& hist = t.lastOn("kubotio/tractor/history")->payload;
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist.find("\"timestamp\":123456,"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist.find("\"voltage\":14.37,"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist.find("\"pwm\":777,\"pwmPercent\":76,\"active\":true,"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist.find("\"engineRunning\":true,\"runHours\":2.0,\"maintenanceDue\":true,"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, hist.find("\"freeHeap\":22648,\"overvoltageAlert\":true,\"epoch\":1790944496}"));
+}
+
+void test_mqtt_compact_storage_is_small() {
+    // 180 buffered samples must stay well under what the full struct would cost.
+    TEST_ASSERT_TRUE(MqttPublisher::kSampleBytes <= 20);
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_duty_latch_skips_unchanged_writes);
+    RUN_TEST(test_duty_latch_invalidate_forces_next_write);
+    RUN_TEST(test_mqtt_compact_storage_keeps_the_published_values);
+    RUN_TEST(test_mqtt_compact_storage_is_small);
     RUN_TEST(test_cross_track_distance);
     RUN_TEST(test_turn_angle);
     RUN_TEST(test_recorder_straight_pass_costs_a_few_points);

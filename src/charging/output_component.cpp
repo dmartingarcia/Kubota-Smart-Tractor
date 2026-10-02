@@ -28,8 +28,12 @@ OutputComponent::OutputComponent(uint8_t outputPin, bool pwmEnabled, bool active
 }
 
 void OutputComponent::write(uint16_t duty) {
-  analogWrite(pin, duty);
-  if(mirrorPin >= 0 && mirrorEnabled) analogWrite(mirrorPin, mirror_duty(duty, maxPWM, mirrorActiveLow));
+  if(outLatch.changed(duty)) analogWrite(pin, duty);
+  if(mirrorPin >= 0 && mirrorEnabled) writeMirror(mirror_duty(duty, maxPWM, mirrorActiveLow));
+}
+
+void OutputComponent::writeMirror(uint16_t duty) {
+  if(mirrorLatch.changed(duty)) analogWrite(mirrorPin, duty);
 }
 
 void OutputComponent::set(bool state) {
@@ -79,9 +83,9 @@ uint16_t OutputComponent::getMaxPWM() const {
 
 void OutputComponent::setMirrorEnabled(bool enabled) {
   mirrorEnabled = enabled;
-  if(enabled && mirrorPin >= 0 && isPWM) analogWrite(mirrorPin, mirror_duty(currentPWM, maxPWM, mirrorActiveLow));
+  if(enabled && mirrorPin >= 0 && isPWM) writeMirror(mirror_duty(currentPWM, maxPWM, mirrorActiveLow));
 }
 
 void OutputComponent::writeMirrorRaw(bool on) {
-  if(mirrorPin >= 0) analogWrite(mirrorPin, mirror_duty(on ? maxPWM : 0, maxPWM, mirrorActiveLow));
+  if(mirrorPin >= 0) writeMirror(mirror_duty(on ? maxPWM : 0, maxPWM, mirrorActiveLow));
 }

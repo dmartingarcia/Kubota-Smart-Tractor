@@ -56,6 +56,21 @@ struct MqttLiveState {
 // since IMqttTransport::connect() can block briefly on a real socket.
 class MqttPublisher {
   public:
+    // Buffered readings are stored packed (voltage in centivolts, heap in 4-byte units, flags in one
+    // byte): 20 bytes instead of ~40, i.e. ~3.6KB less RAM for the 30-minute store-and-forward buffer.
+    // What is published is identical (same 2-decimal voltage, same fields).
+    struct Sample {
+      uint32_t timestamp;
+      uint32_t epoch;
+      uint32_t totalRunSeconds;
+      uint16_t voltageCv;
+      uint16_t pwmValue;
+      uint16_t freeHeap4;
+      uint8_t pwmPercent;
+      uint8_t flags;
+    };
+    static constexpr size_t kSampleBytes = sizeof(Sample);
+
     static constexpr size_t kMaxBuffered = 180; // matches the capacity main.cpp actually passes
     static constexpr size_t kMaxPerBatch = 8;  // bounds a single publish() payload's size
 
@@ -85,7 +100,7 @@ class MqttPublisher {
     size_t bufferCapacity_;
     unsigned long reconnectIntervalMs_;
 
-    MqttReading buffer_[kMaxBuffered];
+    Sample buffer_[kMaxBuffered];
     size_t bufferHead_;
     size_t bufferCount_;
     unsigned long lastConnectAttempt_;
@@ -100,6 +115,8 @@ class MqttPublisher {
     int connectFailures_;
 
     void enqueue(const MqttReading& r);
+    static Sample pack(const MqttReading& r);
+    static MqttReading unpack(const Sample& s);
     void publishState(unsigned long currentMillis);
     void publishBatch();
     void publishDiscovery();

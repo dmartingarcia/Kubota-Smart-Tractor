@@ -14,4 +14,22 @@ uint16_t mirror_duty(uint16_t outputDuty, uint16_t maxDuty, bool activeLow);
 bool boot_blink_on(unsigned long elapsedMs, unsigned long halfPeriodMs, int blinks);
 bool boot_blink_active(unsigned long elapsedMs, unsigned long halfPeriodMs, int blinks);
 
+// Remembers the last duty written to a pin so unchanged values are not rewritten: the PID asks
+// for a duty every 20 ms, but analogWrite() on the ESP8266 reprograms the software-PWM waveform
+// each time it is called, which is wasted CPU (and can disturb the running waveform).
+class DutyLatch {
+  public:
+    bool changed(uint16_t duty) { // true when the pin needs writing (first write always counts)
+      if (valid_ && duty == last_) return false;
+      last_ = duty;
+      valid_ = true;
+      return true;
+    }
+    void invalidate() { valid_ = false; }
+
+  private:
+    uint16_t last_ = 0;
+    bool valid_ = false;
+};
+
 #endif

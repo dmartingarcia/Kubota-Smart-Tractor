@@ -113,6 +113,7 @@
         <h2>System</h2>
         <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
         <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
+        <div class="row"><span class="label">CPU</span><span class="value" id="cpuMHz">--</span></div>
         <div class="row"><span class="label">Last fault</span><span class="value" id="lastFault">none</span></div>
         <div class="row"><span class="label">Loop time (peak 60 s)</span><span class="value" id="loopTime">--</span></div>
         <div class="row"><span class="label">...of it: wifi / web / mqtt / flash</span><span class="value" id="loopBlame">--</span></div>
@@ -483,6 +484,7 @@
         const usedPct = (TOTAL_HEAP_BYTES - data.freeHeap) / TOTAL_HEAP_BYTES * 100;
         document.getElementById('heapFill').style.width = usedPct.toFixed(0) + '%';
         setText('heapValue', usedPct.toFixed(0) + '% (' + (data.freeHeap / 1024).toFixed(1) + ' KB free)');
+        setText('cpuMHz', data.cpuMHz + ' MHz');
         setText('loopTime', (data.loopTimeUs / 1000).toFixed(1) + ' ms');
         const ms = us => (us / 1000).toFixed(0);
         setText('loopBlame', [data.loopWifiUs, data.loopWebUs, data.loopMqttUs, data.loopFlashUs].map(ms).join(' / ') + ' ms');

@@ -77,7 +77,7 @@ void startAP() {
   bool cfgOk = WiFi.softAPConfig(apIP, gateway, subnet);
   bool apOk = WiFi.softAP(ap_ssid, ap_password);
   dnsServer.start(53, "*", apIP);
-  Serial.printf("AP up: mode=%d cfg=%d ap=%d ip=%s heap=%u\n",
+  Serial.printf_P(PSTR("AP up: mode=%d cfg=%d ap=%d ip=%s heap=%u\n"),
                 modeOk, cfgOk, apOk, WiFi.softAPIP().toString().c_str(), ESP.getFreeHeap());
 }
 
@@ -87,13 +87,13 @@ void updateWifi(unsigned long currentMillis) {
       staAttemptInProgress = false;
       wifiConnectedSta = true;
       keepRadioAwake();
-      Serial.println("STA connected");
+      Serial.println(F("STA connected"));
     } else if (currentMillis - staAttemptDeadline < (1UL << 31)) { // deadline reached (non-wrapping compare)
       staAttemptInProgress = false;
       staLastFailStatus = WiFi.status();
       startAP(); // STA attempt used the radio exclusively - bring the AP back
       nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS;
-      Serial.println("STA connection failed, back to AP");
+      Serial.println(F("STA connection failed, back to AP"));
     }
     return;
   }
@@ -103,7 +103,7 @@ void updateWifi(unsigned long currentMillis) {
       wifiConnectedSta = false;
       startAP();
       nextStaAttempt = currentMillis + STA_RETRY_INTERVAL_MS;
-      Serial.println("STA dropped, back to AP");
+      Serial.println(F("STA dropped, back to AP"));
     }
     return;
   }
@@ -121,7 +121,7 @@ void updateWifi(unsigned long currentMillis) {
     staAttemptInProgress = true;
     staAttempts++;
     staAttemptDeadline = currentMillis + STA_CONNECT_TIMEOUT_MS;
-    Serial.println("Trying STA...");
+    Serial.println(F("Trying STA..."));
   }
 }
 
@@ -418,12 +418,12 @@ void manage_alternator() {
             if(pidAutotuner.state() == AutotuneState::SUCCEEDED) {
               AutotuneGains g = pidAutotuner.gains();
               if(pidSettings.save(PidGains{g.kp, g.ki, g.kd})) chargePID.setTunings(g.kp, g.ki, g.kd);
-              else Serial.println("Autotune gains rejected as implausible, keeping the previous ones");
-              Serial.printf("Autotune done: Kp=%.2f Ki=%.2f Kd=%.2f (Ku=%.2f Pu=%.0fms)\n",
+              else Serial.println(F("Autotune gains rejected as implausible, keeping the previous ones"));
+              Serial.printf_P(PSTR("Autotune done: Kp=%.2f Ki=%.2f Kd=%.2f (Ku=%.2f Pu=%.0fms)\n"),
                             g.kp, g.ki, g.kd, g.ku, g.pu);
               autotuneActive = false;
             } else if(pidAutotuner.state() == AutotuneState::FAILED) {
-              Serial.println("Autotune failed, keeping previous tunings");
+              Serial.println(F("Autotune failed, keeping previous tunings"));
               autotuneActive = false;
             }
           } else {
@@ -463,20 +463,12 @@ void store_data() {
 
   historyIndex = (historyIndex + 1) % HISTORY_SIZE;
 
-  Serial.printf("Current Voltage: %.2fV\n", current_voltage);
-  Serial.printf("Alternator State: %s\n", alternator.isActive() ? "ON" : "OFF");
-  Serial.printf("PWM Value: %d\n", alternator.getPWM());
-  Serial.printf("Relay State: %s\n", last_state ? "ON" : "OFF");
-  Serial.printf("Next Relay Check: %lu\n", next_relay_check);
-  Serial.printf("History Index: %d\n", historyIndex);
-  if (connected) {
-    Serial.printf("Connected: Yes (%s)\n", WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("Connected: No");
-  }
-  Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
-  Serial.printf("Max loop time: %lu us (wifi %lu, web %lu, mqtt %lu, flash %lu)\n",
-                maxLoopDurationUs, maxWifiUs, maxWebUs, maxMqttUs, maxFlashUs);
+  // One line every 5 s (was ten): the format string lives in flash (PSTR) and the UART, which
+  // blocks loop() while it drains, has far less to send.
+  Serial.printf_P(PSTR("V=%.2f alt=%s pwm=%d wifi=%s heap=%u cpu=%uMHz loop=%luus (wifi %lu web %lu mqtt %lu flash %lu)\n"),
+                  current_voltage, alternator.isActive() ? "ON" : "OFF", alternator.getPWM(),
+                  connected ? "sta" : "ap", ESP.getFreeHeap(), ESP.getCpuFreqMHz(),
+                  maxLoopDurationUs, maxWifiUs, maxWebUs, maxMqttUs, maxFlashUs);
   if(millis() - peakWindowStart >= 60000) {
     peakLoopUs = peakWifiUs = peakWebUs = peakMqttUs = peakFlashUs = 0;
     peakWindowStart = millis();
@@ -488,7 +480,6 @@ void store_data() {
   if(maxFlashUs > peakFlashUs) peakFlashUs = maxFlashUs;
   maxLoopDurationUs = 0;
   maxWifiUs = maxWebUs = maxMqttUs = maxFlashUs = 0;
-  Serial.println();
 }
 
 // One pass of the control loop (voltage read + alternator decision). loop() runs it as part of

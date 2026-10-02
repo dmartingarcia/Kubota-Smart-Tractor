@@ -93,7 +93,7 @@ void setupWebServer() {
     server.onNotFound(handleNotFound); // captive portal: unknown host/path -> redirect to the dashboard
     server.collectHeaders("If-None-Match");
     server.begin();
-    Serial.println("Web server started");
+    Serial.println(F("Web server started"));
     web_initialized = true;
   }
 }
@@ -124,67 +124,68 @@ void handleRoot() {
 }
 
 void handleData() {
-  DynamicJsonDocument doc(2048); // ~35 fields at 16B each + copied Strings; 512 silently dropped the tail
-  doc["voltage"] = history[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE].voltage;
-  doc["outputMode"] = alternator.isPWMEnabled() ? "pwm" : "relay";
-  doc["pwmPercentage"] = alternator.getPWMPercent();
-  doc["engineRunning"] = engine_running;
-  doc["engineProbing"] = engine_probing;
-  doc["overvoltageAlert"] = overvoltage_alert;
-  doc["engineSources"] = engineModeSettings.sources();
-  doc["voltageScale"] = voltageCalibration.scale();
-  doc["pidKp"] = chargePID.kp();
-  doc["pidKi"] = chargePID.ki();
-  doc["pidKd"] = chargePID.kd();
-  doc["pidCustom"] = pidSettings.hasCustom();
-  doc["alternatorPausedS"] = (alternator_pause_remaining_ms() + 999) / 1000;
-  doc["fault"] = static_cast<int>(activeFault);  // LED blink code, 0 = none
-  doc["lastFault"] = static_cast<int>(lastFault);
-  doc["lastFaultAgoS"] = (millis() - lastFaultMillis) / 1000;
-  doc["gpsConnected"] = gpsReader.isConnected();
-  doc["gpsHasFix"] = gpsHasAcceptedFix;
-  doc["trackPoints"] = trackRecorder.size();
-  doc["trackDistanceM"] = trackRecorder.distanceMeters();
+  DynamicJsonDocument doc(2560); // keys copied from flash (F()) count against the pool // ~35 fields at 16B each + copied Strings; 512 silently dropped the tail
+  doc[F("voltage")] = history[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE].voltage;
+  doc[F("outputMode")] = alternator.isPWMEnabled() ? "pwm" : "relay";
+  doc[F("pwmPercentage")] = alternator.getPWMPercent();
+  doc[F("engineRunning")] = engine_running;
+  doc[F("engineProbing")] = engine_probing;
+  doc[F("overvoltageAlert")] = overvoltage_alert;
+  doc[F("engineSources")] = engineModeSettings.sources();
+  doc[F("voltageScale")] = voltageCalibration.scale();
+  doc[F("pidKp")] = chargePID.kp();
+  doc[F("pidKi")] = chargePID.ki();
+  doc[F("pidKd")] = chargePID.kd();
+  doc[F("pidCustom")] = pidSettings.hasCustom();
+  doc[F("alternatorPausedS")] = (alternator_pause_remaining_ms() + 999) / 1000;
+  doc[F("fault")] = static_cast<int>(activeFault);  // LED blink code, 0 = none
+  doc[F("lastFault")] = static_cast<int>(lastFault);
+  doc[F("lastFaultAgoS")] = (millis() - lastFaultMillis) / 1000;
+  doc[F("gpsConnected")] = gpsReader.isConnected();
+  doc[F("gpsHasFix")] = gpsHasAcceptedFix;
+  doc[F("trackPoints")] = trackRecorder.size();
+  doc[F("trackDistanceM")] = trackRecorder.distanceMeters();
   if (gpsHasAcceptedFix) {
     // filtered position (see GpsJumpFilter) - rejects fixes implying an impossible
     // speed, so a momentary GPS glitch doesn't show the tractor teleporting
-    doc["gpsLat"] = gpsJumpFilter.lastLat();
-    doc["gpsLon"] = gpsJumpFilter.lastLon();
-    doc["gpsSpeedKmh"] = gpsReader.speedKmh();
-    doc["gpsSpeedAvgKmh"] = gpsSpeedAvg.average(millis());
+    doc[F("gpsLat")] = gpsJumpFilter.lastLat();
+    doc[F("gpsLon")] = gpsJumpFilter.lastLon();
+    doc[F("gpsSpeedKmh")] = gpsReader.speedKmh();
+    doc[F("gpsSpeedAvgKmh")] = gpsSpeedAvg.average(millis());
   }
 
-  doc["wifiMode"] = wifiConnectedSta ? "sta" : "ap_fallback";
-  doc["staAttempts"] = staAttempts;
-  doc["staLastFail"] = staLastFailStatus;
+  doc[F("wifiMode")] = wifiConnectedSta ? "sta" : "ap_fallback";
+  doc[F("staAttempts")] = staAttempts;
+  doc[F("staLastFail")] = staLastFailStatus;
 
-  doc["autotuneActive"] = autotuneActive;
-  doc["runHours"] = usageCounters.totalRunSeconds() / 3600.0;
-  doc["secondsSinceService_h"] = usageCounters.secondsSinceService() / 3600.0;
-  doc["serviceIntervalHours"] = usageCounters.serviceIntervalHours();
-  doc["maintenanceDue"] = usageCounters.isMaintenanceDue();
-  doc["bootCount"] = usageCounters.bootCount();
-  doc["freeHeap"] = ESP.getFreeHeap();
-  doc["resetReason"] = ESP.getResetReason();
-  doc["resetInfo"] = ESP.getResetInfo();
-  doc["wifiModeRaw"] = (int)WiFi.getMode();
-  doc["softApIp"] = WiFi.softAPIP().toString();
-  doc["softApStations"] = WiFi.softAPgetStationNum();
-  doc["maxFreeBlock"] = ESP.getMaxFreeBlockSize();
-  doc["heapFrag"] = ESP.getHeapFragmentation();
-  doc["loopTimeUs"] = peakLoopUs > maxLoopDurationUs ? peakLoopUs : maxLoopDurationUs; // 60s peak
-  doc["loopWifiUs"] = peakWifiUs;
-  doc["loopWebUs"] = peakWebUs;
-  doc["loopMqttUs"] = peakMqttUs;
-  doc["loopFlashUs"] = peakFlashUs;
+  doc[F("autotuneActive")] = autotuneActive;
+  doc[F("runHours")] = usageCounters.totalRunSeconds() / 3600.0;
+  doc[F("secondsSinceService_h")] = usageCounters.secondsSinceService() / 3600.0;
+  doc[F("serviceIntervalHours")] = usageCounters.serviceIntervalHours();
+  doc[F("maintenanceDue")] = usageCounters.isMaintenanceDue();
+  doc[F("bootCount")] = usageCounters.bootCount();
+  doc[F("freeHeap")] = ESP.getFreeHeap();
+  doc[F("cpuMHz")] = ESP.getCpuFreqMHz();
+  doc[F("resetReason")] = ESP.getResetReason();
+  doc[F("resetInfo")] = ESP.getResetInfo();
+  doc[F("wifiModeRaw")] = (int)WiFi.getMode();
+  doc[F("softApIp")] = WiFi.softAPIP().toString();
+  doc[F("softApStations")] = WiFi.softAPgetStationNum();
+  doc[F("maxFreeBlock")] = ESP.getMaxFreeBlockSize();
+  doc[F("heapFrag")] = ESP.getHeapFragmentation();
+  doc[F("loopTimeUs")] = peakLoopUs > maxLoopDurationUs ? peakLoopUs : maxLoopDurationUs; // 60s peak
+  doc[F("loopWifiUs")] = peakWifiUs;
+  doc[F("loopWebUs")] = peakWebUs;
+  doc[F("loopMqttUs")] = peakMqttUs;
+  doc[F("loopFlashUs")] = peakFlashUs;
 
-  doc["mqttConnected"] = mqttPublisher.isConnected();
-  doc["mqttHasLastPublish"] = mqttPublisher.hasLastPublished();
+  doc[F("mqttConnected")] = mqttPublisher.isConnected();
+  doc[F("mqttHasLastPublish")] = mqttPublisher.hasLastPublished();
   if (mqttPublisher.hasLastPublished()) {
     const MqttReading& last = mqttPublisher.lastPublished();
-    doc["mqttLastVoltage"] = last.voltage;
-    doc["mqttLastPwmPercent"] = alternator.getMaxPWM() ? (last.pwmValue * 100 / alternator.getMaxPWM()) : 0;
-    doc["mqttLastSentAgoS"] = (millis() - mqttPublisher.lastPublishMillis()) / 1000;
+    doc[F("mqttLastVoltage")] = last.voltage;
+    doc[F("mqttLastPwmPercent")] = alternator.getMaxPWM() ? (last.pwmValue * 100 / alternator.getMaxPWM()) : 0;
+    doc[F("mqttLastSentAgoS")] = (millis() - mqttPublisher.lastPublishMillis()) / 1000;
   }
 
   String json;
@@ -223,12 +224,12 @@ void handleHistory() {
 
 void handleAutotuneStart() {
   start_pid_autotune();
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 void handleMaintenanceReset() {
   usageCounters.resetMaintenanceCounter();
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 // /voltage/calibrate?volts=13.8  -> scale = multimeter reading / what the device currently reads
@@ -265,7 +266,7 @@ void handlePidReset() {
   pidSettings.resetToFactory();
   PidGains g = pidSettings.gains();
   chargePID.setTunings(g.kp, g.ki, g.kd);
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 // /track: the track for the dashboard map, streamed as JSON. Thinned to ~600 points when it is
@@ -348,7 +349,7 @@ void handleTrackGpx() {
 
 void handleTrackClear() {
   trackRecorder.clear();
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 void handleEngineSources() {
@@ -364,7 +365,7 @@ void handleMaintenanceInterval() {
     long hours = server.arg("hours").toInt();
     if (hours > 0) usageCounters.setServiceIntervalHours(static_cast<uint32_t>(hours));
   }
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 void handleMaintenancePage() {
@@ -393,16 +394,16 @@ void handleMaintenanceLogList() {
 void handleMaintenanceLogAdd() {
   String note = server.hasArg("note") ? server.arg("note") : "";
   maintenanceLog.addEntry(current_epoch_or_zero(), usageCounters.totalRunSeconds() / 3600, note.c_str());
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 void handleMqttTest() {
   mqttPublisher.forceReconnectNow();
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
 }
 
 void handleRestart() {
-  server.send(200, "application/json", "{\"ok\":true}");
+  server.send_P(200, PSTR("application/json"), PSTR("{\"ok\":true}"));
   server.client().flush();
   delay(100); // let the response actually go out before rebooting
   ESP.restart();
