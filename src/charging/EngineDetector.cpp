@@ -1,5 +1,11 @@
 #include "EngineDetector.h"
 
+namespace {
+// Rise above resting voltage, with the alternator NOT driven, that ends cooldown early.
+// Deliberately larger than the in-pulse threshold, which can be tiny at idle RPM.
+constexpr float kCooldownExitRiseVolts = 0.3f;
+}
+
 EngineDetector::EngineDetector(unsigned long pulseDurationMs, unsigned long cooldownMs, float voltageRiseVolts, unsigned long graceMs)
   : pulseDurationMs_(pulseDurationMs), cooldownMs_(cooldownMs), voltageRiseVolts_(voltageRiseVolts),
     started_(false), phase_(Phase::PULSING), phaseStartMillis_(0), baselineVoltage_(0), engineRunning_(false),
@@ -34,7 +40,7 @@ bool EngineDetector::update(float voltage, unsigned long currentMillis) {
   }
 
   if (phase_ == Phase::COOLDOWN) {
-    bool voltageRoseOnItsOwn = voltage - baselineVoltage_ >= voltageRiseVolts_;
+    bool voltageRoseOnItsOwn = voltage - baselineVoltage_ >= kCooldownExitRiseVolts;
     if (!voltageRoseOnItsOwn && currentMillis - phaseStartMillis_ < cooldownMs_) { probing_ = false; return false; }
     phase_ = Phase::PULSING;
     phaseStartMillis_ = currentMillis;
@@ -57,7 +63,8 @@ bool EngineDetector::update(float voltage, unsigned long currentMillis) {
   probing_ = false;
   phase_ = Phase::COOLDOWN;
   phaseStartMillis_ = currentMillis;
-  baselineVoltage_ = voltage; // cooldown watches for a rise from here, to end early
+  // baselineVoltage_ stays the resting level from pulse start: the battery recovering
+  // from the pulse's sag returns to it, so only a real rise above it ends the cooldown.
   return false;
 }
 

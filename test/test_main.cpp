@@ -295,6 +295,21 @@ void test_mirror_duty_clamps_overrange() {
     TEST_ASSERT_EQUAL_UINT16(0, mirror_duty(2000, 1023, true));
 }
 
+void test_engine_detector_small_rise_is_enough_during_pulse() {
+    EngineDetector detector(3000, 8000, 0.05);
+    detector.update(12.60, 0);
+    TEST_ASSERT_TRUE(detector.update(12.66, 800)); // idle-RPM sized rise
+    TEST_ASSERT_TRUE(detector.engineRunning());
+}
+
+void test_engine_detector_battery_recovery_does_not_end_cooldown() {
+    EngineDetector detector(3000, 8000, 0.05);
+    detector.update(12.60, 0);          // resting level
+    detector.update(12.30, 3000);       // sagged under field load, dry pulse -> cooldown
+    TEST_ASSERT_FALSE(detector.update(12.60, 4000)); // recovers to rest: not a start
+    TEST_ASSERT_FALSE(detector.update(12.62, 5000));
+}
+
 void test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own() {
     EngineDetector detector(2000, 60000, 0.3);
     detector.update(12.5, 0);
@@ -578,6 +593,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_engine_detector_grace_keeps_running_through_voltage_sag);
     RUN_TEST(test_engine_detector_grace_expires_into_probe);
     RUN_TEST(test_engine_detector_reset_drops_grace);
+    RUN_TEST(test_engine_detector_small_rise_is_enough_during_pulse);
+    RUN_TEST(test_engine_detector_battery_recovery_does_not_end_cooldown);
     RUN_TEST(test_engine_detector_cooldown_ends_early_when_voltage_rises_on_its_own);
     RUN_TEST(test_median_reading_rejects_spike);
     RUN_TEST(test_mirror_duty_follows_output_exactly);
