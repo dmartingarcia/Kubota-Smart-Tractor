@@ -40,6 +40,7 @@ void handleEngineSources();
 
 void setupWebServer();
 void handleRoot();
+void handleNotFound();
 void handleData();
 void handleHistory();
 

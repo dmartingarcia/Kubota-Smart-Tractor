@@ -578,6 +578,43 @@ void test_mqtt_worst_case_batch_fits_transport_buffer() {
     TEST_ASSERT_EQUAL(8, pub.publishCount());
 }
 
+void test_mqtt_reconnect_backs_off_while_broker_is_unreachable() {
+    FakeMqttTransport t;
+    t.connectResult = false;
+    MqttPublisher pub(t, 5, 30000);
+    pub.update(true, 0);        // attempt 1
+    pub.update(true, 30000);    // attempt 2 (after 30s)
+    TEST_ASSERT_EQUAL(2, t.connectCalls);
+    pub.update(true, 60000);    // only 30s since attempt 2, backoff is now 60s -> no attempt
+    TEST_ASSERT_EQUAL(2, t.connectCalls);
+    pub.update(true, 90000);    // 60s since attempt 2 -> attempt 3
+    TEST_ASSERT_EQUAL(3, t.connectCalls);
+    pub.update(true, 150000);   // backoff 120s -> not yet
+    TEST_ASSERT_EQUAL(3, t.connectCalls);
+}
+
+void test_mqtt_backoff_is_capped_and_resets_on_success() {
+    FakeMqttTransport t;
+    t.connectResult = false;
+    MqttPublisher pub(t, 5, 30000);
+    unsigned long now = 0;
+    for (int i = 0; i < 12; i++) { pub.update(true, now); now += 600000; } // far apart: every call attempts
+    int attempts = t.connectCalls;
+    TEST_ASSERT_EQUAL(12, attempts);
+    pub.update(true, now);                 // 0s later than last attempt
+    now += 300000;                         // cap is 5 min
+    pub.update(true, now);
+    TEST_ASSERT_EQUAL(attempts + 2, t.connectCalls);
+
+    t.connectResult = true;
+    pub.update(true, now + 300000);        // connects
+    t.connectedState = false;              // drop again
+    t.connectResult = false;
+    int before = t.connectCalls;
+    pub.update(true, now + 330000);        // backoff reset: base interval (30s) applies again
+    TEST_ASSERT_EQUAL(before + 1, t.connectCalls);
+}
+
 void test_gps_jump_filter_accepts_first_fix() {
     GpsJumpFilter f(60.0, 3);
     TEST_ASSERT_TRUE(f.accept(0.0, 0.0, 1000));
@@ -818,8 +855,33 @@ void test_fault_blink_shows_code_a_couple_of_times_then_stops() {
     TEST_ASSERT_FALSE(fault_blink_on(1720 + 1000 + 10, 3, 120, 1000)); // would repeat, but only on within active window
 }
 
+void test_pid_hold_at_max_keeps_output_at_100_percent_on_band_entry() {
+    RealTimePid pid(30, 3, 1, 0, 1023);
+    pid.hold(1023, 130, 5000);                                  // was in full-charge (V < 13.0), forced to 100%
+    TEST_ASSERT_EQUAL_DOUBLE(1023, pid.compute(140, 130, 5020)); // enters the band: no drop to 0, no ramp from scratch
+    TEST_ASSERT_EQUAL_DOUBLE(1023, pid.compute(140, 132, 5040)); // still below setpoint -> stays at 100%
+}
+
+void test_pid_hold_after_long_gap_does_not_jump() {
+    RealTimePid pid(30, 3, 1, 0, 1023);
+    pid.compute(140, 130, 0);
+    pid.hold(1023, 130, 600000);                                // 10 min in full charge without compute()
+    double out = pid.compute(140, 130, 600020);                 // dt is 20ms, not 10 minutes
+    TEST_ASSERT_TRUE(out > 1000);
+}
+
+void test_pid_hold_at_zero_after_cutoff_starts_from_nothing() {
+    RealTimePid pid(30, 3, 1, 0, 1023);
+    pid.hold(0, 146, 5000);                                     // cutoff (V >= 14.4): field off
+    double out = pid.compute(140, 144, 5020);                   // back in band, still above setpoint
+    TEST_ASSERT_EQUAL_DOUBLE(0, out);                           // no stale 100% integral -> no new overshoot
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_pid_hold_at_max_keeps_output_at_100_percent_on_band_entry);
+    RUN_TEST(test_pid_hold_after_long_gap_does_not_jump);
+    RUN_TEST(test_pid_hold_at_zero_after_cutoff_starts_from_nothing);
     RUN_TEST(test_fault_blink_shows_code_a_couple_of_times_then_stops);
     RUN_TEST(test_led_fault_none_when_everything_is_normal);
     RUN_TEST(test_led_fault_priority);
@@ -880,6 +942,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_mqtt_throttles_reconnect_attempts);
     RUN_TEST(test_mqtt_flushes_buffer_and_publishes_on_reconnect);
     RUN_TEST(test_mqtt_buffer_drops_oldest_when_full);
+    RUN_TEST(test_mqtt_reconnect_backs_off_while_broker_is_unreachable);
+    RUN_TEST(test_mqtt_backoff_is_capped_and_resets_on_success);
     RUN_TEST(test_mqtt_state_topic_is_latest_reading_even_with_backlog);
     RUN_TEST(test_mqtt_history_topic_drains_oldest_first_in_capped_batches);
     RUN_TEST(test_mqtt_state_not_republished_without_new_sample);

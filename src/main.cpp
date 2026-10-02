@@ -223,6 +223,15 @@ bool engine_probing = false; // true while a MAX_CHARGE probe pulse has no verdi
 bool overvoltage_alert = false;
 unsigned long overvoltageAlertMillis = 0;
 unsigned long maxLoopDurationUs = 0; // high-water mark, reset every store_data() cycle
+// Per-section high-water marks (same reset), so the dashboard can say WHO made the loop slow.
+unsigned long maxWifiUs = 0, maxWebUs = 0, maxMqttUs = 0, maxFlashUs = 0;
+// 60s peak-hold copy of the above (what the dashboard shows, so a 5s poll can't miss a spike).
+unsigned long peakLoopUs = 0, peakWifiUs = 0, peakWebUs = 0, peakMqttUs = 0, peakFlashUs = 0;
+unsigned long peakWindowStart = 0;
+static inline void trackMax(unsigned long& maxUs, unsigned long startUs) {
+  unsigned long d = micros() - startUs;
+  if(d > maxUs) maxUs = d;
+}
 // Fault tracking for the LED codes (StatusLed.h) and the dashboard: what is wrong now, and
 // the last fault seen since boot (stays after it clears, so a short blip can still be read).
 LedFault activeFault = LedFault::NONE;
@@ -290,10 +299,12 @@ void manage_alternator() {
 
       ChargeAction action = decide_pwm_safety_action(current_voltage, VOLTAGE_THRESHOLD_HIGH, VOLTAGE_THRESHOLD_LOW);
 
-      // The PID only runs inside the regulation band. Outside it (cutoff / full-charge) its
-      // integral would wind up to the clamp, then overshoot past 14.4V on re-entry and unwind
-      // for tens of seconds, bouncing off the cutoff. So reset it whenever it is not in control.
-      if(action != ChargeAction::RUN_PID) chargePID.reset();
+      // The PID only computes inside the regulation band. While the safety envelope drives the
+      // output (full charge / cutoff) it is held aligned with that output, so entering the band
+      // continues from the same output: 100% after full charge (no drop to 0), 0% after a cutoff
+      // (no stale integral to overshoot with) - and no integrating of the time spent outside.
+      if(action == ChargeAction::MAX_CHARGE) chargePID.hold(MAX_CHARGE_CURRENT_PWM, pidInput, millis());
+      else if(action == ChargeAction::OFF) chargePID.hold(0, pidInput, millis());
 
       switch(action) {
         case ChargeAction::OFF:
@@ -401,8 +412,19 @@ void store_data() {
     Serial.println("Connected: No");
   }
   Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
-  Serial.printf("Max loop time: %lu us\n", maxLoopDurationUs);
+  Serial.printf("Max loop time: %lu us (wifi %lu, web %lu, mqtt %lu, flash %lu)\n",
+                maxLoopDurationUs, maxWifiUs, maxWebUs, maxMqttUs, maxFlashUs);
+  if(millis() - peakWindowStart >= 60000) {
+    peakLoopUs = peakWifiUs = peakWebUs = peakMqttUs = peakFlashUs = 0;
+    peakWindowStart = millis();
+  }
+  if(maxLoopDurationUs > peakLoopUs) peakLoopUs = maxLoopDurationUs;
+  if(maxWifiUs > peakWifiUs) peakWifiUs = maxWifiUs;
+  if(maxWebUs > peakWebUs) peakWebUs = maxWebUs;
+  if(maxMqttUs > peakMqttUs) peakMqttUs = maxMqttUs;
+  if(maxFlashUs > peakFlashUs) peakFlashUs = maxFlashUs;
   maxLoopDurationUs = 0;
+  maxWifiUs = maxWebUs = maxMqttUs = maxFlashUs = 0;
   Serial.println();
 }
 
@@ -455,7 +477,9 @@ void loop() {
     shownFault = fault;
   }
 
+  unsigned long sectionUs = micros();
   updateWifi(currentMillis);
+  trackMax(maxWifiUs, sectionUs);
   connected = wifiConnectedSta;
   dnsServer.processNextRequest();
   gpsReader.update();
@@ -467,9 +491,12 @@ void loop() {
   else gpsHasAcceptedFix = false; // fix lost: stop showing a stale position/speed
 
   ArduinoOTA.handle();
+  sectionUs = micros();
   server.handleClient();
+  trackMax(maxWebUs, sectionUs);
 
   manage_alternator();
+  sectionUs = micros();
   usageCounters.tick(engine_running, currentMillis);
 
   // This board only keeps running ~3-4s after the tractor's engine (and its own
@@ -479,6 +506,7 @@ void loop() {
     usageCounters.forceSave();
   }
   lastEngineRunning = engine_running;
+  trackMax(maxFlashUs, sectionUs);
 
   // Data storage (5000ms interval, not every fast PID cycle)
   if(currentMillis - lastDataStore >= 5000) {
@@ -486,6 +514,7 @@ void loop() {
     lastDataStore = currentMillis;
   }
 
+  sectionUs = micros();
   if(mqtt_host[0] != '\0') {
     mqttTransport.loop(); // keepalive/ping - needs to run well under the 15s broker keepalive
                            // regardless of the slower sample/publish cadences below
@@ -508,6 +537,8 @@ void loop() {
       mqttPublisher.update(wifiConnectedSta, currentMillis);
     }
   }
+
+  trackMax(maxMqttUs, sectionUs);
 
   unsigned long loopDurationUs = micros() - loopStartUs;
   if (loopDurationUs > maxLoopDurationUs) maxLoopDurationUs = loopDurationUs;

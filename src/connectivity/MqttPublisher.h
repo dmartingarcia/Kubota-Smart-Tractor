@@ -97,6 +97,7 @@ class MqttPublisher {
     MqttReading latest_;
     bool latestDirty_;
     MqttLiveState live_;
+    int connectFailures_;
 
     void enqueue(const MqttReading& r);
     void publishState(unsigned long currentMillis);

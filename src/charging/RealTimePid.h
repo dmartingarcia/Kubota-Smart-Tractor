@@ -21,6 +21,12 @@ class RealTimePid {
 
     void reset(); // clears integral/derivative history, e.g. on mode transitions
 
+    // Bumpless hand-over for when something else (full-charge / cutoff) is driving the output:
+    // keeps the PID aligned with it - integral = that output, history refreshed to "now" - so the
+    // first compute() after the hand-back continues from the same output instead of from 0 and
+    // without integrating the whole time spent elsewhere as one huge dt.
+    void hold(double output, double input, unsigned long currentMillis);
+
   private:
     double kp_, ki_, kd_;
     double outputMin_, outputMax_;

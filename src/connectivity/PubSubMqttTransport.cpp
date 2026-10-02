@@ -4,6 +4,7 @@ PubSubMqttTransport::PubSubMqttTransport(const char* host, uint16_t port, const 
                                          const char* user, const char* password)
   : mqttClient_(wifiClient_), clientId_(clientId), user_(user), password_(password) {
   mqttClient_.setServer(host, port);
+  wifiClient_.setTimeout(500); // bounds DNS lookup + TCP connect (default 5s) so an unreachable broker can't stall loop()
   mqttClient_.setSocketTimeout(1); // seconds - bounds worst-case blocking on connect()/publish()
   mqttClient_.setBufferSize(2200); // batched publishes (MqttPublisher::kMaxPerBatch) need more than the 256B default
 }

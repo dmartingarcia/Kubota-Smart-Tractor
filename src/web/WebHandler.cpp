@@ -31,6 +31,7 @@ extern bool wifiConnectedSta;
 extern int staAttempts;
 extern int staLastFailStatus;
 extern unsigned long maxLoopDurationUs;
+extern unsigned long peakLoopUs, peakWifiUs, peakWebUs, peakMqttUs, peakFlashUs;
 extern MqttPublisher mqttPublisher;
 extern const char* mqtt_host;
 extern GpsReader gpsReader;
@@ -73,14 +74,35 @@ void setupWebServer() {
     server.on("/restart", guarded(handleRestart)); // remote recovery when there's no physical/USB access
     server.on("/mqtt/test", guarded(handleMqttTest));
     server.on("/engine/sources", guarded(handleEngineSources));
-    server.onNotFound(handleRoot); // captive portal: any unknown host/path -> dashboard
+    server.onNotFound(handleNotFound); // captive portal: unknown host/path -> redirect to the dashboard
+    server.collectHeaders("If-None-Match");
     server.begin();
     Serial.println("Web server started");
     web_initialized = true;
   }
 }
 
+// Captive-portal probes and stray requests (favicon, ...) get a tiny reply instead of the
+// whole ~22KB dashboard: a synchronous send of that size stalls loop() on a weak link.
+void handleNotFound() {
+  if (server.uri() == "/favicon.ico") { server.send(204); return; }
+  server.sendHeader("Location", String("http://") + server.client().localIP().toString() + "/", true);
+  server.send(302, "text/plain", "");
+}
+
+// The dashboard is ~22KB and the ESP8266 serves one connection at a time, so a cold load
+// competes with the browser's other requests and can arrive truncated on a slow link. The
+// ETag changes with every firmware build: the browser revalidates (tiny 304) instead of
+// re-downloading the page on every visit.
+static const char kDashboardEtag[] = "\"" __DATE__ " " __TIME__ "\"";
+
 void handleRoot() {
+  if (server.hasHeader("If-None-Match") && server.header("If-None-Match") == kDashboardEtag) {
+    server.send(304);
+    return;
+  }
+  server.sendHeader("ETag", kDashboardEtag);
+  server.sendHeader("Cache-Control", "no-cache");
   static const char kDashboardHtml[] PROGMEM = R"=====(
   <!DOCTYPE html>
   <html>
@@ -182,7 +204,8 @@ void handleRoot() {
         <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
         <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
         <div class="row"><span class="label">Last fault</span><span class="value" id="lastFault">none</span></div>
-        <div class="row"><span class="label">Loop time (peak)</span><span class="value" id="loopTime">--</span></div>
+        <div class="row"><span class="label">Loop time (peak 60 s)</span><span class="value" id="loopTime">--</span></div>
+        <div class="row"><span class="label">...of it: wifi / web / mqtt / flash</span><span class="value" id="loopBlame">--</span></div>
         <div class="row"><span class="label">Refresh rate</span>
           <span><select id="pollInterval" onchange="setPollInterval()">
             <option value="1000">1s</option>
@@ -369,6 +392,8 @@ void handleRoot() {
         document.getElementById('heapFill').style.width = usedPct.toFixed(0) + '%';
         setText('heapValue', usedPct.toFixed(0) + '% (' + (data.freeHeap / 1024).toFixed(1) + ' KB free)');
         setText('loopTime', (data.loopTimeUs / 1000).toFixed(1) + ' ms');
+        const ms = us => (us / 1000).toFixed(0);
+        setText('loopBlame', [data.loopWifiUs, data.loopWebUs, data.loopMqttUs, data.loopFlashUs].map(ms).join(' / ') + ' ms');
       }
 
       const SRC = { always: 1, gps: 2, alt: 4 };
@@ -464,17 +489,28 @@ void handleRoot() {
         ctx.fillStyle = accent; ctx.fill();
       }
 
+      // /data and /history are independent: one failing must not blank the other. History is
+      // heavier, so it's fetched every 30 s (and on the first load), not on every poll.
+      let lastHistoryFetch = 0, cachedHistory = [];
       async function fetchData() {
+        let ok = false;
         try {
-          const [statusRes, historyRes] = await Promise.all([fetch('/data'), fetch('/history')]);
-          updateStatus(await statusRes.json());
-          drawChart(await historyRes.json());
-          document.getElementById('offlineBanner').style.display = 'none';
-          setText('updated', 'updated ' + new Date().toLocaleTimeString());
+          updateStatus(await (await fetch('/data')).json());
+          ok = true;
         } catch (error) {
-          console.error('Update failed:', error);
-          document.getElementById('offlineBanner').style.display = 'block';
+          console.error('Status update failed:', error);
         }
+        try {
+          if (!lastHistoryFetch || Date.now() - lastHistoryFetch > 30000) {
+            cachedHistory = await (await fetch('/history')).json();
+            lastHistoryFetch = Date.now();
+          }
+        } catch (error) {
+          console.error('History update failed:', error);
+        }
+        drawChart(cachedHistory);
+        document.getElementById('offlineBanner').style.display = ok ? 'none' : 'block';
+        if (ok) setText('updated', 'updated ' + new Date().toLocaleTimeString());
       }
 
       async function startAutotune() {
@@ -517,7 +553,7 @@ void handleRoot() {
 }
 
 void handleData() {
-  DynamicJsonDocument doc(1280); // ~35 fields at 16B each + copied Strings; 512 silently dropped the tail
+  DynamicJsonDocument doc(1536); // ~35 fields at 16B each + copied Strings; 512 silently dropped the tail
   doc["voltage"] = history[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE].voltage;
   doc["outputMode"] = alternator.isPWMEnabled() ? "pwm" : "relay";
   doc["pwmPercentage"] = alternator.getPWMPercent();
@@ -557,7 +593,11 @@ void handleData() {
   doc["softApStations"] = WiFi.softAPgetStationNum();
   doc["maxFreeBlock"] = ESP.getMaxFreeBlockSize();
   doc["heapFrag"] = ESP.getHeapFragmentation();
-  doc["loopTimeUs"] = maxLoopDurationUs;
+  doc["loopTimeUs"] = peakLoopUs > maxLoopDurationUs ? peakLoopUs : maxLoopDurationUs; // 60s peak
+  doc["loopWifiUs"] = peakWifiUs;
+  doc["loopWebUs"] = peakWebUs;
+  doc["loopMqttUs"] = peakMqttUs;
+  doc["loopFlashUs"] = peakFlashUs;
 
   doc["mqttConnected"] = mqttPublisher.isConnected();
   doc["mqttHasLastPublish"] = mqttPublisher.hasLastPublished();

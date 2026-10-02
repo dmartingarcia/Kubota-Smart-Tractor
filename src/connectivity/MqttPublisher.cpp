@@ -31,7 +31,7 @@ MqttPublisher::MqttPublisher(IMqttTransport& transport, size_t bufferCapacity, u
     bufferHead_(0), bufferCount_(0),
     lastConnectAttempt_(0 - reconnectIntervalMs), // wraps so the first update() attempts a connect immediately
     discoveryPublished_(false), publishCount_(0), lastPublished_{},
-    hasLastPublished_(false), lastPublishMillis_(0), latest_{}, latestDirty_(false), live_{} {}
+    hasLastPublished_(false), lastPublishMillis_(0), latest_{}, latestDirty_(false), live_{}, connectFailures_(0) {}
 
 void MqttPublisher::enqueue(const MqttReading& r) {
   if (bufferCount_ < bufferCapacity_) {
@@ -148,10 +148,18 @@ void MqttPublisher::update(bool networkAvailable, unsigned long currentMillis) {
   if (!networkAvailable) return; // recordSample() already buffered whatever came in
 
   if (!transport_.connected()) {
-    if (should_run_cycle(currentMillis, lastConnectAttempt_, reconnectIntervalMs_)) {
+    // Each failed attempt can block the caller (DNS + TCP + CONNACK), so back off: base interval,
+    // doubling per consecutive failure, capped at 5 minutes. Reset on success.
+    unsigned long interval = reconnectIntervalMs_;
+    for (int i = 1; i < connectFailures_ && interval < 300000UL; i++) interval *= 2; // 1 failure: base interval
+    if (interval > 300000UL) interval = 300000UL;
+    if (should_run_cycle(currentMillis, lastConnectAttempt_, interval)) {
       lastConnectAttempt_ = currentMillis;
       if (transport_.connect()) {
         discoveryPublished_ = false; // republish discovery after (re)connect
+        connectFailures_ = 0;
+      } else if (connectFailures_ < 16) {
+        connectFailures_++;
       }
     }
     return;
@@ -168,4 +176,4 @@ void MqttPublisher::update(bool networkAvailable, unsigned long currentMillis) {
 size_t MqttPublisher::bufferedCount() const { return bufferCount_; }
 int MqttPublisher::publishCount() const { return publishCount_; }
 bool MqttPublisher::isConnected() { return transport_.connected(); }
-void MqttPublisher::forceReconnectNow() { lastConnectAttempt_ = 0 - reconnectIntervalMs_; }
+void MqttPublisher::forceReconnectNow() { lastConnectAttempt_ = 0 - 300000UL; connectFailures_ = 0; }

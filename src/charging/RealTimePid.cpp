@@ -42,3 +42,10 @@ void RealTimePid::reset() {
   integral_ = 0;
   hasLast_ = false;
 }
+
+void RealTimePid::hold(double output, double input, unsigned long currentMillis) {
+  integral_ = clamp(output, outputMin_, outputMax_);
+  lastInput_ = input;
+  lastMillis_ = currentMillis;
+  hasLast_ = true;
+}
