@@ -221,16 +221,9 @@ uint32_t epochOrZero() {
 void setup() {
   Serial.begin(115200);
 
-  // Hardware setup
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
-  digitalWrite(RELAY_PIN, HIGH);
-  delay(5000);
-  digitalWrite(RELAY_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
-  delay(5000);
-
+  // Hardware setup: the alternator output (and the LED mirroring it) are already configured
+  // and driven off by OutputComponent's constructor - no blocking delays here, so the AP,
+  // web server and the PID loop are up within a second of power-on.
 
   // WiFi: AP up first (always reachable), STA attempted alongside it. Web server/OTA
   // started here since they just work over whichever WiFi interface is active.

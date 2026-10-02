@@ -35,22 +35,38 @@ extern EngineModeSettings engineModeSettings;
 extern SpeedAverager gpsSpeedAvg;
 extern GpsJumpFilter gpsJumpFilter;
 extern bool gpsHasAcceptedFix;
+extern const char* ap_password;
 bool web_initialized = false;
+
+namespace {
+// Endpoints that change state (autotune, engine mode, maintenance, restart, MQTT retry) ask
+// for HTTP basic auth: user "admin", password = the AP password from secrets.h. Read-only
+// pages (dashboard, /data, /history, logbook view) stay open. An empty AP password disables it.
+bool authorized() {
+  if (ap_password[0] == '\0' || server.authenticate("admin", ap_password)) return true;
+  server.requestAuthentication();
+  return false;
+}
+typedef void (*Handler)();
+ESP8266WebServer::THandlerFunction guarded(Handler h) {
+  return [h]() { if (authorized()) h(); };
+}
+}
 
 void setupWebServer() {
   if (!web_initialized) {
     server.on("/", handleRoot);
     server.on("/data", handleData);
     server.on("/history", handleHistory);
-    server.on("/autotune/start", handleAutotuneStart);
-    server.on("/maintenance/reset", handleMaintenanceReset);
-    server.on("/maintenance/interval", handleMaintenanceInterval);
+    server.on("/autotune/start", guarded(handleAutotuneStart));
+    server.on("/maintenance/reset", guarded(handleMaintenanceReset));
+    server.on("/maintenance/interval", guarded(handleMaintenanceInterval));
     server.on("/maintenance", handleMaintenancePage);
     server.on("/maintenance/log", handleMaintenanceLogList);
-    server.on("/maintenance/log/add", handleMaintenanceLogAdd);
-    server.on("/restart", handleRestart); // remote recovery when there's no physical/USB access
-    server.on("/mqtt/test", handleMqttTest);
-    server.on("/engine/sources", handleEngineSources);
+    server.on("/maintenance/log/add", guarded(handleMaintenanceLogAdd));
+    server.on("/restart", guarded(handleRestart)); // remote recovery when there's no physical/USB access
+    server.on("/mqtt/test", guarded(handleMqttTest));
+    server.on("/engine/sources", guarded(handleEngineSources));
     server.onNotFound(handleRoot); // captive portal: any unknown host/path -> dashboard
     server.begin();
     Serial.println("Web server started");
@@ -151,7 +167,7 @@ void handleRoot() {
         <label class="check"><input type="checkbox" id="srcGps" onchange="saveEngineSources()"> By GPS (avg speed &ge; 3 km/h, last 15 s)</label>
         <label class="check"><input type="checkbox" id="srcAlt" onchange="saveEngineSources()"> By alternator (voltage probing)</label>
         <div class="row"><span class="label">GPS avg speed (15 s)</span><span class="value" id="engineGpsAvg">no fix</span></div>
-        <div class="note">Tick any combination: the engine counts as on if any ticked source says so. "Always on" skips probing and charges whenever voltage is low.</div>
+        <div class="note">Changing settings asks for user <b>admin</b> and the AP password. Tick any combination: the engine counts as on if any ticked source says so. "Always on" skips probing and charges whenever voltage is low.</div>
       </div>
 
       <div class="card">

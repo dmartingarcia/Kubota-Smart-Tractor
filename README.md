@@ -182,6 +182,12 @@ plain `<canvas>`, no CDN) so it renders correctly even fully offline in AP mode.
 - GPS card (hidden until the module has a fix - see [GPS](#gps-optional-hardware-))
 - RAM used / peak loop time, configurable refresh rate, "restart device" button
 
+**Access control:** the dashboard and read-only endpoints (`/data`, `/history`, logbook view)
+are open; anything that changes state (`/autotune/start`, `/engine/sources`,
+`/maintenance/reset|interval|log/add`, `/restart`, `/mqtt/test`) asks for HTTP basic auth -
+user `admin`, password = `ap_password` from `secrets.h` (an empty AP password disables it).
+OTA uploads are not password-protected.
+
 **Maintenance logbook (`/maintenance`):**
 - Table of logged maintenance events (date - if NTP has synced, otherwise "unknown
   date" - hours at time of service, free-text note)
