@@ -81,6 +81,12 @@ void MqttPublisher::publishDiscovery() {
   binary("overvoltage", "Tractor Overvoltage Alert", "overvoltageAlert", "safety");
   binary("engine_running", "Tractor Engine Running", "engineRunning", "running");
   binary("charging_active", "Tractor Charging", "active", "battery_charging");
+  binary("fault_active", "Tractor Fault", "fault > 0", "problem");
+  sensor("fault", "Tractor Fault Code", "fault", "");
+  transport_.publish("homeassistant/sensor/kubotio_fault_text/config",
+    "{\"name\":\"Tractor Fault Reason\",\"state_topic\":\"kubotio/tractor/state\",\"expire_after\":180,"
+    "\"value_template\":\"{{ {0:'none',2:'overvoltage',3:'voltage sensor range',4:'low memory'}[value_json.fault] | default('unknown') }}\","
+    "\"unique_id\":\"kubotio_fault_text\"}", true);
 
   transport_.publish("homeassistant/device_tracker/kubotio_tractor/config",
     "{\"name\":\"Tractor\",\"json_attributes_topic\":\"kubotio/tractor/gps\",\"source_type\":\"gps\","
@@ -90,15 +96,15 @@ void MqttPublisher::publishDiscovery() {
 void MqttPublisher::publishState(unsigned long currentMillis) {
   if (!latestDirty_) return; // nothing new since the last state publish
   const MqttReading& r = latest_;
-  char payload[448];
+  char payload[480];
   snprintf(payload, sizeof(payload),
            "{\"timestamp\":%lu,\"epoch\":%lu,\"voltage\":%.2f,\"pwm\":%u,\"pwmPercent\":%u,\"active\":%s,"
-           "\"engineRunning\":%s,\"engineProbing\":%s,\"engineSources\":%u,\"runHours\":%.1f,"
+           "\"engineRunning\":%s,\"engineProbing\":%s,\"engineSources\":%u,\"fault\":%u,\"runHours\":%.1f,"
            "\"maintenanceDue\":%s,\"freeHeap\":%lu,\"overvoltageAlert\":%s,"
            "\"gpsFix\":%s,\"gpsSpeedKmh\":%.1f,\"gpsSpeedAvgKmh\":%.1f}",
            r.timestamp, static_cast<unsigned long>(r.epochSeconds), r.voltage, r.pwmValue, r.pwmPercent,
            r.active ? "true" : "false", r.engineRunning ? "true" : "false",
-           live_.engineProbing ? "true" : "false", live_.engineSources, r.totalRunSeconds / 3600.0,
+           live_.engineProbing ? "true" : "false", live_.engineSources, live_.fault, r.totalRunSeconds / 3600.0,
            r.maintenanceDue ? "true" : "false", static_cast<unsigned long>(r.freeHeap),
            r.overvoltageAlert ? "true" : "false", live_.gpsHasFix ? "true" : "false",
            live_.gpsHasFix ? live_.speedKmh : 0.0f, live_.gpsHasFix ? live_.speedAvgKmh : 0.0f);

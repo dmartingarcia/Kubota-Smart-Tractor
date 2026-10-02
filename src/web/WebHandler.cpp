@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include "../charging/output_component.h"
 #include "../charging/EngineMode.h"
+#include "../charging/StatusLed.h"
 #include "../connectivity/MqttPublisher.h"
 #include "../gps/GpsReader.h"
 #include "../gps/GpsJumpFilter.h"
@@ -33,6 +34,9 @@ extern const char* mqtt_host;
 extern GpsReader gpsReader;
 extern EngineModeSettings engineModeSettings;
 extern SpeedAverager gpsSpeedAvg;
+extern LedFault activeFault;
+extern LedFault lastFault;
+extern unsigned long lastFaultMillis;
 extern GpsJumpFilter gpsJumpFilter;
 extern bool gpsHasAcceptedFix;
 extern const char* ap_password;
@@ -149,6 +153,7 @@ void handleRoot() {
     <div class="head"><h1>Tractor Battery Monitor</h1><span id="updated">connecting...</span></div>
     <div id="offlineBanner" class="banner banner-bad" style="display:none;">Connection to device lost - retrying...</div>
     <div id="dueBanner" class="banner banner-warn" style="display:none;">&#128295; Maintenance due - <a href="/maintenance">open logbook</a></div>
+    <div id="faultBanner" class="banner banner-bad" style="display:none;"></div>
     <div id="overvoltageBanner" class="banner banner-bad" style="display:none;">&#9888;&#65039; Overvoltage cutoff active - alternator forced off</div>
     <div class="grid">
 
@@ -174,6 +179,7 @@ void handleRoot() {
         <h2>System</h2>
         <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
         <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
+        <div class="row"><span class="label">Last fault</span><span class="value" id="lastFault">none</span></div>
         <div class="row"><span class="label">Loop time (peak)</span><span class="value" id="loopTime">--</span></div>
         <div class="row"><span class="label">Refresh rate</span>
           <span><select id="pollInterval" onchange="setPollInterval()">
@@ -337,6 +343,21 @@ void handleRoot() {
       }
 
       const TOTAL_HEAP_BYTES = 81920; // ESP8266 total RAM
+      // Same codes as the LED blink patterns (StatusLed.h).
+      const FAULTS = {
+        2: 'Overvoltage cutoff active',
+        3: 'Battery voltage outside 8-17 V: check the sense wiring / divider',
+        4: 'Free RAM almost exhausted: restart the device',
+      };
+      function updateFault(data) {
+        const banner = document.getElementById('faultBanner');
+        banner.style.display = data.fault ? 'block' : 'none';
+        if (data.fault) banner.textContent = '\u26A0\uFE0F Fault ' + data.fault + ' (' + data.fault + ' blinks): ' + (FAULTS[data.fault] || 'unknown');
+        setText('lastFault', data.lastFault
+          ? data.lastFault + ': ' + FAULTS[data.lastFault] + ' (' + Fmt.ago(data.lastFaultAgoS) + ')'
+          : 'none');
+      }
+
       function updateSystem(data) {
         const usedPct = (TOTAL_HEAP_BYTES - data.freeHeap) / TOTAL_HEAP_BYTES * 100;
         document.getElementById('heapFill').style.width = usedPct.toFixed(0) + '%';
@@ -364,6 +385,7 @@ void handleRoot() {
 
       function updateStatus(data) {
         updateEngineSources(data);
+        updateFault(data);
         updateChargingStatus(data);
         updateConnectivity(data);
         updateAutotune(data);
@@ -497,6 +519,9 @@ void handleData() {
   doc["engineProbing"] = engine_probing;
   doc["overvoltageAlert"] = overvoltage_alert;
   doc["engineSources"] = engineModeSettings.sources();
+  doc["fault"] = static_cast<int>(activeFault);  // LED blink code, 0 = none
+  doc["lastFault"] = static_cast<int>(lastFault);
+  doc["lastFaultAgoS"] = (millis() - lastFaultMillis) / 1000;
   doc["gpsConnected"] = gpsReader.isConnected();
   doc["gpsHasFix"] = gpsHasAcceptedFix;
   if (gpsHasAcceptedFix) {

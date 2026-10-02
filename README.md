@@ -231,12 +231,13 @@ it yet).
 
 | Topic | Retained | Content |
 |---|---|---|
-| `kubotio/tractor/state` | yes | ONE JSON object: the newest reading plus engine state (`engineRunning`, `engineProbing`, `engineSources`) and GPS (`gpsFix`, `gpsSpeedKmh`, `gpsSpeedAvgKmh`). What HA entities read, so after an outage they show the present immediately. Only sent when there is a new sample |
+| `kubotio/tractor/state` | yes | ONE JSON object: the newest reading plus engine state (`engineRunning`, `engineProbing`, `engineSources`, `fault`) and GPS (`gpsFix`, `gpsSpeedKmh`, `gpsSpeedAvgKmh`). What HA entities read, so after an outage they show the present immediately. Only sent when there is a new sample |
 | `kubotio/tractor/gps` | yes | `latitude`/`longitude`/`gps_accuracy` attributes for the HA device tracker, only while there's a fix |
 | `kubotio/tractor/history` | no | JSON array, oldest first, up to 8 readings per publish (`MqttPublisher::kMaxPerBatch`): store-and-forward of every sample, each with `epoch` (NTP wall-clock seconds, `0` if not synced) |
 
 - HA MQTT discovery configs are published on (re)connect: voltage, PWM%, charging hours,
-  free heap, speed, maintenance due, overvoltage, engine running, charging active, and a
+  free heap, speed, maintenance due, overvoltage, engine running, charging active, fault
+  (binary problem sensor, numeric code and text reason, same codes as the LED) and a
   device tracker. Entities use `expire_after: 180` so they go unavailable if the device
   stops publishing instead of showing a stale retained value.
 - Dashboard has a "test connection" button (`/mqtt/test`, forces an immediate
@@ -280,6 +281,7 @@ On power-on the LED blinks 3 times (200ms on/off, `BOOT_BLINK_*`) to show the bo
 If something is wrong the LED shows a fault code instead of mirroring the output: N quick pulses,
 a 1s pause, shown 5 times (`FAULT_BLINK_REPEATS`), then it goes back to mirroring the output even
 if the fault persists. A different fault, or the same one reappearing after it cleared, is shown again.
+The dashboard shows the active fault in a banner and the last fault seen since boot under "System".
 
 | Pulses | Fault |
 |---|---|

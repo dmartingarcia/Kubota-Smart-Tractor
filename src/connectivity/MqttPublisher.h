@@ -38,6 +38,7 @@ struct MqttLiveState {
   float speedAvgKmh;
   bool engineProbing;
   uint8_t engineSources;
+  uint8_t fault; // LED fault code (StatusLed.h), 0 = none
 };
 
 // Publishes telemetry to MQTT/Home Assistant. Sampling and publishing are decoupled

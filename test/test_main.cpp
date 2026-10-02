@@ -440,13 +440,13 @@ void test_mqtt_flushes_buffer_and_publishes_on_reconnect() {
     pub.update(true, 100); // now connected: discovery + batch(1)
     TEST_ASSERT_EQUAL(0, static_cast<int>(pub.bufferedCount()));
     TEST_ASSERT_EQUAL(1, pub.publishCount());
-    TEST_ASSERT_EQUAL(10, t.discoveryCount());
-    TEST_ASSERT_EQUAL(12, t.publishCalls); // 10 discovery configs + 1 state + 1 history batch
+    TEST_ASSERT_EQUAL(13, t.discoveryCount());
+    TEST_ASSERT_EQUAL(15, t.publishCalls); // 13 discovery configs + 1 state + 1 history batch
 
     pub.recordSample(make_reading(200));
     pub.update(true, 200); // already connected, discovery not repeated
     TEST_ASSERT_EQUAL(2, pub.publishCount());
-    TEST_ASSERT_EQUAL(14, t.publishCalls); // + state + history batch, discovery not repeated
+    TEST_ASSERT_EQUAL(17, t.publishCalls); // + state + history batch, discovery not repeated
 }
 
 void test_mqtt_buffer_drops_oldest_when_full() {
@@ -516,7 +516,7 @@ void test_mqtt_gps_topic_only_with_fix_and_carries_position() {
 
     MqttLiveState live{};
     live.gpsHasFix = true; live.latitude = 41.123456; live.longitude = 2.654321;
-    live.speedKmh = 7.5f; live.speedAvgKmh = 6.0f; live.engineProbing = true; live.engineSources = 6;
+    live.speedKmh = 7.5f; live.speedAvgKmh = 6.0f; live.engineProbing = true; live.engineSources = 6; live.fault = 3;
     pub.setLiveState(live);
     pub.recordSample(make_reading(10000));
     pub.update(true, 11000);
@@ -531,6 +531,7 @@ void test_mqtt_gps_topic_only_with_fix_and_carries_position() {
     TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"gpsSpeedKmh\":7.5"));
     TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"engineProbing\":true"));
     TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"engineSources\":6"));
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, state->payload.find("\"fault\":3"));
 }
 
 void test_mqtt_readings_carry_epoch_when_known() {
@@ -558,10 +559,12 @@ void test_mqtt_discovery_entities_read_the_state_object() {
         TEST_ASSERT_EQUAL(std::string::npos, m.payload.find("[-1]")); // no more array indexing
         if (m.payload.find("\"state_topic\":\"kubotio/tractor/state\"") != std::string::npos) stateEntities++;
     }
-    TEST_ASSERT_EQUAL(9, stateEntities);                                   // 9 sensors on the state topic
+    TEST_ASSERT_EQUAL(12, stateEntities);                                  // 12 entities on the state topic
     TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/device_tracker/kubotio_tractor/config"));
     TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/binary_sensor/kubotio_engine_running/config"));
     TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/sensor/kubotio_gps_speed/config"));
+    TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/binary_sensor/kubotio_fault_active/config"));
+    TEST_ASSERT_NOT_NULL(t.lastOn("homeassistant/sensor/kubotio_fault_text/config"));
 }
 
 void test_mqtt_worst_case_batch_fits_transport_buffer() {

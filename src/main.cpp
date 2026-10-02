@@ -217,6 +217,11 @@ bool engine_probing = false; // true while a MAX_CHARGE probe pulse has no verdi
 bool overvoltage_alert = false;
 unsigned long overvoltageAlertMillis = 0;
 unsigned long maxLoopDurationUs = 0; // high-water mark, reset every store_data() cycle
+// Fault tracking for the LED codes (StatusLed.h) and the dashboard: what is wrong now, and
+// the last fault seen since boot (stays after it clears, so a short blip can still be read).
+LedFault activeFault = LedFault::NONE;
+LedFault lastFault = LedFault::NONE;
+unsigned long lastFaultMillis = 0;
 bool lastEngineRunning = false; // edge-detects engine shutdown to force an immediate save
 
 // NTP wall-clock seconds, 0 until synced (before ~2023 time() is near zero).
@@ -421,11 +426,14 @@ void loop() {
 
   // Fault code on the LED (after the boot blink): takes the LED over from the PWM mirror
   // while a fault is active, hands it back as soon as it clears.
+  activeFault = decide_led_fault(current_voltage, overvoltage_alert, ESP.getFreeHeap());
+  if(activeFault != LedFault::NONE) { lastFault = activeFault; lastFaultMillis = currentMillis; }
+
   if(bootBlinkDone) {
     static LedFault shownFault = LedFault::NONE;
     static unsigned long faultStart = 0;
     static bool faultLedOwned = false;
-    LedFault fault = decide_led_fault(current_voltage, overvoltage_alert, ESP.getFreeHeap());
+    LedFault fault = activeFault;
     if(fault != shownFault) faultStart = currentMillis; // new code (or cleared): restart the pattern
     unsigned long faultElapsed = currentMillis - faultStart;
     int pulses = static_cast<int>(fault);
@@ -485,7 +493,8 @@ void loop() {
       mqttPublisher.setLiveState(MqttLiveState{gpsHasAcceptedFix, gpsJumpFilter.lastLat(), gpsJumpFilter.lastLon(),
                                                static_cast<float>(gpsReader.speedKmh()),
                                                static_cast<float>(gpsSpeedAvg.average(currentMillis)),
-                                               engine_probing, engineModeSettings.sources()});
+                                               engine_probing, engineModeSettings.sources(),
+                                               static_cast<uint8_t>(activeFault)});
     }
 
     if(currentMillis - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {
