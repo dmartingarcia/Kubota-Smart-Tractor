@@ -5,10 +5,12 @@
 #include "../src/charging/PidAutotuner.h"
 #include "../src/charging/EngineDetector.h"
 #include "../src/charging/PwmMirror.h"
+#include "../src/charging/EngineMode.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
 #include "../src/gps/GpsJumpFilter.h"
+#include "../src/gps/SpeedAverager.h"
 #include <string.h>
 
 void setUp() {}
@@ -581,8 +583,118 @@ void test_maintenance_log_add_and_read_roundtrip() {
     TEST_ASSERT_EQUAL_STRING("Filter; replaced", out[1].note);
 }
 
+
+void test_engine_sources_always_forces_running() {
+    EngineSourceDecision d = decide_engine_sources(ENGINE_SRC_ALWAYS, false);
+    TEST_ASSERT_TRUE(d.forceRunning);
+    TEST_ASSERT_FALSE(d.useAlternator);
+}
+
+void test_engine_sources_gps_only_follows_motion() {
+    TEST_ASSERT_TRUE(decide_engine_sources(ENGINE_SRC_GPS, true).forceRunning);
+    EngineSourceDecision still = decide_engine_sources(ENGINE_SRC_GPS, false);
+    TEST_ASSERT_FALSE(still.forceRunning);
+    TEST_ASSERT_FALSE(still.useAlternator);
+}
+
+void test_engine_sources_alternator_only_never_forces() {
+    EngineSourceDecision d = decide_engine_sources(ENGINE_SRC_ALTERNATOR, true); // GPS motion ignored
+    TEST_ASSERT_FALSE(d.forceRunning);
+    TEST_ASSERT_TRUE(d.useAlternator);
+}
+
+void test_engine_sources_multicheck_combines() {
+    uint8_t m = ENGINE_SRC_GPS | ENGINE_SRC_ALTERNATOR;
+    EngineSourceDecision moving = decide_engine_sources(m, true);
+    TEST_ASSERT_TRUE(moving.forceRunning);
+    TEST_ASSERT_TRUE(moving.useAlternator);
+    EngineSourceDecision still = decide_engine_sources(m, false);
+    TEST_ASSERT_FALSE(still.forceRunning);
+    TEST_ASSERT_TRUE(still.useAlternator);
+}
+
+void test_engine_sources_sanitize() {
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_DEFAULT, sanitize_engine_sources(0));
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_DEFAULT, sanitize_engine_sources(0xF8)); // only unknown bits
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_GPS, sanitize_engine_sources(ENGINE_SRC_GPS | 0x80));
+}
+
+void test_engine_mode_settings_default_and_persist() {
+    InMemoryFlashStore store;
+    EngineModeSettings a(store);
+    a.begin();
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_DEFAULT, a.sources()); // first boot
+    a.setSources(ENGINE_SRC_ALWAYS);
+    TEST_ASSERT_EQUAL_INT(1, store.writeCalls);
+
+    EngineModeSettings b(store);                // "reboot"
+    b.begin();
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_ALWAYS, b.sources());
+}
+
+void test_engine_mode_settings_skips_redundant_and_invalid_writes() {
+    InMemoryFlashStore store;
+    EngineModeSettings s(store);
+    s.begin();
+    s.setSources(ENGINE_SRC_DEFAULT);           // unchanged -> no write
+    TEST_ASSERT_EQUAL_INT(0, store.writeCalls);
+    s.setSources(0);                            // invalid -> sanitized to default -> unchanged
+    TEST_ASSERT_EQUAL_INT(0, store.writeCalls);
+    TEST_ASSERT_EQUAL_UINT8(ENGINE_SRC_DEFAULT, s.sources());
+}
+
+
+void test_speed_average_over_window() {
+    SpeedAverager avg(15000, 1000);
+    avg.add(0.0, 0);
+    avg.add(6.0, 1000);
+    avg.add(9.0, 2000);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 5.0, avg.average(2000));
+}
+
+void test_speed_average_drops_samples_older_than_window() {
+    SpeedAverager avg(15000, 1000);
+    avg.add(30.0, 0);
+    avg.add(0.0, 14000);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 15.0, avg.average(14500));
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 0.0, avg.average(16000)); // the 30 km/h sample aged out
+}
+
+void test_speed_average_throttles_samples() {
+    SpeedAverager avg(15000, 1000);
+    avg.add(10.0, 0);
+    avg.add(100.0, 200); // too soon, ignored
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 10.0, avg.average(300));
+}
+
+void test_speed_average_empty_and_clear() {
+    SpeedAverager avg(15000, 1000);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 0.0, avg.average(1000));
+    avg.add(8.0, 0);
+    avg.clear();
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 0.0, avg.average(500));
+}
+
+void test_speed_average_survives_ring_overflow() {
+    SpeedAverager avg(1000000, 1);
+    for (int i = 0; i < 100; i++) avg.add(i < 68 ? 0.0 : 10.0, i * 10UL); // last 32 slots are all 10
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 10.0, avg.average(1000));
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_speed_average_over_window);
+    RUN_TEST(test_speed_average_drops_samples_older_than_window);
+    RUN_TEST(test_speed_average_throttles_samples);
+    RUN_TEST(test_speed_average_empty_and_clear);
+    RUN_TEST(test_speed_average_survives_ring_overflow);
+    RUN_TEST(test_engine_sources_always_forces_running);
+    RUN_TEST(test_engine_sources_gps_only_follows_motion);
+    RUN_TEST(test_engine_sources_alternator_only_never_forces);
+    RUN_TEST(test_engine_sources_multicheck_combines);
+    RUN_TEST(test_engine_sources_sanitize);
+    RUN_TEST(test_engine_mode_settings_default_and_persist);
+    RUN_TEST(test_engine_mode_settings_skips_redundant_and_invalid_writes);
     RUN_TEST(test_voltage_calibration);
     RUN_TEST(test_pwm_safety_thresholds);
     RUN_TEST(test_relay_overvoltage_turns_off_and_starts_delay);

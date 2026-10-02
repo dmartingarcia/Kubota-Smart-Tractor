@@ -36,6 +36,7 @@ void handleMaintenanceLogList();
 void handleMaintenanceLogAdd();
 void handleRestart();
 void handleMqttTest();
+void handleEngineSources();
 
 void setupWebServer();
 void handleRoot();

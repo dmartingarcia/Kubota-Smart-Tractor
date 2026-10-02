@@ -10,6 +10,7 @@
 #include "charging/VoltageSensor.h"
 #include "charging/AlternatorLogic.h"
 #include "charging/EngineDetector.h"
+#include "charging/EngineMode.h"
 #include "charging/PidAutotuner.h"
 #include "charging/RealTimePid.h"
 #include "storage/UsageCounters.h"
@@ -20,6 +21,7 @@
 #include "connectivity/PubSubMqttTransport.h"
 #include "gps/GpsReader.h"
 #include "gps/GpsJumpFilter.h"
+#include "gps/SpeedAverager.h"
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -122,7 +124,8 @@ void updateWifi(unsigned long currentMillis) {
 #define ENGINE_PROBE_PULSE_MS         3000  // hold full output this long before checking for a voltage rise
 #define ENGINE_PROBE_COOLDOWN_MS      8000  // wait this long before the next pulse if the engine looks off
 #define ENGINE_PROBE_RISE_VOLTS       0.05  // minimum voltage rise during a pulse to call the engine running
-#define ENGINE_GPS_MIN_SPEED_KMH      3.0   // moving faster than this (valid GPS fix) means the engine is on
+#define ENGINE_GPS_MIN_SPEED_KMH      3.0   // average speed above this (valid GPS fix) means the engine is on
+#define ENGINE_GPS_AVG_WINDOW_MS      15000 // ...averaged over this window, sampled once per second
 #define ENGINE_RUNNING_GRACE_MS       15000 // after seeing the engine charging, ride out voltage sags this long before probing
 
 // PID Configuration
@@ -177,6 +180,12 @@ GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 // Rejects momentary GPS position jumps a tractor can't physically make (60km/h implied
 // speed cap; resyncs after 3 consecutive rejects rather than getting stuck on a bad seed).
 GpsJumpFilter gpsJumpFilter(60.0, 3);
+SpeedAverager gpsSpeedAvg(ENGINE_GPS_AVG_WINDOW_MS, 1000);
+
+// Which signals may declare "engine on" (always / GPS motion / alternator probing, any
+// combination), user-selectable from the dashboard and persisted.
+LittleFsStore engineModeStore("/engine_mode.bin");
+EngineModeSettings engineModeSettings(engineModeStore);
 bool gpsHasAcceptedFix = false;
 
 // Global state
@@ -225,6 +234,7 @@ void setup() {
   ArduinoOTA.begin();
   setupWebServer();
   usageCounters.begin(millis());
+  engineModeSettings.begin();
   gpsReader.begin();
 
   // Best-effort NTP sync (non-blocking): only resolves once/if STA has internet.
@@ -257,12 +267,18 @@ void manage_alternator() {
       lastPidUpdate = millis();
       if(!autotuneActive) pidOutput = chargePID.compute(Setpoint, pidInput, millis());
 
+      EngineSourceDecision src = decide_engine_sources(
+          engineModeSettings.sources(),
+          gps_indicates_engine_running(gpsReader.hasFix(), gpsReader.fixAgeMs(),
+                                       gpsSpeedAvg.average(millis()), ENGINE_GPS_MIN_SPEED_KMH));
+      bool engineEvidence = src.forceRunning || src.useAlternator; // may charging voltage prove the engine?
+
       switch(decide_pwm_safety_action(current_voltage, VOLTAGE_THRESHOLD_HIGH, VOLTAGE_THRESHOLD_LOW)) {
         case ChargeAction::OFF:
           alternator.off();
           lastTargetPWM = 0;
-          engineDetector.noteRunning(millis());
-          engine_running = true; // voltage this high means something is charging it
+          if(engineEvidence) engineDetector.noteRunning(millis()); else engineDetector.reset();
+          engine_running = engineEvidence; // voltage this high means something is charging it
           engine_probing = false;
           overvoltage_alert = true;
           overvoltageAlertMillis = millis(); // refreshed every cycle while still active
@@ -270,23 +286,33 @@ void manage_alternator() {
         case ChargeAction::MAX_CHARGE:
           // Voltage this low is also where a resting, engine-off battery sits, so don't just
           // hold the field coil at 100% and drain it further — probe with pulses instead.
-          if(gps_indicates_engine_running(gpsReader.hasFix(), gpsReader.fixAgeMs(), gpsReader.speedKmh(),
-                                          ENGINE_GPS_MIN_SPEED_KMH)) {
-            engineDetector.noteRunning(millis()); // moving => engine on, charge now without probing
-          }
-          if(engineDetector.update(current_voltage, millis())) {
+          if(src.forceRunning) {
+            engineDetector.noteRunning(millis()); // engine known on: charge now, no probing
             alternator.pwm(MAX_CHARGE_CURRENT_PWM);
             lastTargetPWM = MAX_CHARGE_CURRENT_PWM;
+            engine_running = true;
+            engine_probing = false;
+          } else if(src.useAlternator) {
+            if(engineDetector.update(current_voltage, millis())) {
+              alternator.pwm(MAX_CHARGE_CURRENT_PWM);
+              lastTargetPWM = MAX_CHARGE_CURRENT_PWM;
+            } else {
+              alternator.off();
+              lastTargetPWM = 0;
+            }
+            engine_running = engineDetector.engineRunning();
+            engine_probing = engineDetector.isProbing();
           } else {
+            engineDetector.reset(); // only GPS selected and standing still: engine considered off
             alternator.off();
             lastTargetPWM = 0;
+            engine_running = false;
+            engine_probing = false;
           }
-          engine_running = engineDetector.engineRunning();
-          engine_probing = engineDetector.isProbing();
           break;
         case ChargeAction::RUN_PID: {
-          engineDetector.noteRunning(millis());
-          engine_running = true; // alternator has already raised voltage out of the probe zone
+          if(engineEvidence) engineDetector.noteRunning(millis()); else engineDetector.reset();
+          engine_running = engineEvidence; // alternator has already raised voltage out of the probe zone
           engine_probing = false;
           if(autotuneActive) {
             double out = pidAutotuner.update(pidInput, millis());
@@ -374,6 +400,8 @@ void loop() {
   if(gpsReader.hasFix() && gpsJumpFilter.accept(gpsReader.latitude(), gpsReader.longitude(), currentMillis)) {
     gpsHasAcceptedFix = true;
   }
+
+  if(gpsReader.hasFix()) gpsSpeedAvg.add(gpsReader.speedKmh(), currentMillis);
 
   ArduinoOTA.handle();
   server.handleClient();

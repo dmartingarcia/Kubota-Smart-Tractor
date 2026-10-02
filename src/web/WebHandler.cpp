@@ -1,9 +1,11 @@
 #include "WebHandler.h"
 #include <ArduinoJson.h>
 #include "../charging/output_component.h"
+#include "../charging/EngineMode.h"
 #include "../connectivity/MqttPublisher.h"
 #include "../gps/GpsReader.h"
 #include "../gps/GpsJumpFilter.h"
+#include "../gps/SpeedAverager.h"
 #include <time.h>
 
 namespace {
@@ -29,6 +31,8 @@ extern unsigned long maxLoopDurationUs;
 extern MqttPublisher mqttPublisher;
 extern const char* mqtt_host;
 extern GpsReader gpsReader;
+extern EngineModeSettings engineModeSettings;
+extern SpeedAverager gpsSpeedAvg;
 extern GpsJumpFilter gpsJumpFilter;
 extern bool gpsHasAcceptedFix;
 bool web_initialized = false;
@@ -46,6 +50,7 @@ void setupWebServer() {
     server.on("/maintenance/log/add", handleMaintenanceLogAdd);
     server.on("/restart", handleRestart); // remote recovery when there's no physical/USB access
     server.on("/mqtt/test", handleMqttTest);
+    server.on("/engine/sources", handleEngineSources);
     server.onNotFound(handleRoot); // captive portal: any unknown host/path -> dashboard
     server.begin();
     Serial.println("Web server started");
@@ -102,6 +107,8 @@ void handleRoot() {
       .banner-warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
       .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
       .head h1 { margin: 0; }
+      .check { display: flex; gap: 8px; align-items: center; padding: 6px 0; cursor: pointer; }
+      .check input { width: 18px; height: 18px; flex: none; }
       #updated { font-size: 0.8em; color: var(--label); }
       button:active { transform: scale(0.97); }
       .bar { width: 100%; height: 16px; background: var(--border); border-radius: 8px; overflow: hidden; margin: 6px 0; }
@@ -139,6 +146,15 @@ void handleRoot() {
       </div>
 
       <div class="card">
+        <h2>Engine detection</h2>
+        <label class="check"><input type="checkbox" id="srcAlways" onchange="saveEngineSources()"> Always on (fixed)</label>
+        <label class="check"><input type="checkbox" id="srcGps" onchange="saveEngineSources()"> By GPS (avg speed &ge; 3 km/h, last 15 s)</label>
+        <label class="check"><input type="checkbox" id="srcAlt" onchange="saveEngineSources()"> By alternator (voltage probing)</label>
+        <div class="row"><span class="label">GPS avg speed (15 s)</span><span class="value" id="engineGpsAvg">no fix</span></div>
+        <div class="note">Tick any combination: the engine counts as on if any ticked source says so. "Always on" skips probing and charges whenever voltage is low.</div>
+      </div>
+
+      <div class="card">
         <h2>System</h2>
         <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
         <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
@@ -165,6 +181,7 @@ void handleRoot() {
         <h2>GPS</h2>
         <div class="row"><span class="label">Position</span><span class="value" id="gpsPosition">--</span></div>
         <div class="row"><span class="label">Speed</span><span class="value" id="gpsSpeed">--</span></div>
+        <div class="row"><span class="label">Avg speed (15 s)</span><span class="value" id="gpsSpeedAvg">--</span></div>
       </div>
 
       <div class="card">
@@ -282,7 +299,9 @@ void handleRoot() {
         if (data.gpsHasFix) {
           setText('gpsPosition', data.gpsLat.toFixed(5) + ', ' + data.gpsLon.toFixed(5));
           setText('gpsSpeed', data.gpsSpeedKmh.toFixed(1) + ' km/h');
+          setText('gpsSpeedAvg', data.gpsSpeedAvgKmh.toFixed(1) + ' km/h');
         }
+        setText('engineGpsAvg', data.gpsHasFix ? data.gpsSpeedAvgKmh.toFixed(1) + ' km/h' : 'no fix');
       }
 
       function updateAutotune(data) {
@@ -309,7 +328,26 @@ void handleRoot() {
         setText('loopTime', (data.loopTimeUs / 1000).toFixed(1) + ' ms');
       }
 
+      const SRC = { always: 1, gps: 2, alt: 4 };
+      function updateEngineSources(data) {
+        // Don't fight the user mid-click: skip while one of the boxes has focus.
+        if (['srcAlways', 'srcGps', 'srcAlt'].includes(document.activeElement.id)) return;
+        document.getElementById('srcAlways').checked = !!(data.engineSources & SRC.always);
+        document.getElementById('srcGps').checked = !!(data.engineSources & SRC.gps);
+        document.getElementById('srcAlt').checked = !!(data.engineSources & SRC.alt);
+      }
+      async function saveEngineSources() {
+        let mask = 0;
+        if (document.getElementById('srcAlways').checked) mask |= SRC.always;
+        if (document.getElementById('srcGps').checked) mask |= SRC.gps;
+        if (document.getElementById('srcAlt').checked) mask |= SRC.alt;
+        await fetch('/engine/sources?mask=' + mask); // empty selection falls back to the default on the device
+        document.activeElement.blur();
+        fetchData();
+      }
+
       function updateStatus(data) {
+        updateEngineSources(data);
         updateChargingStatus(data);
         updateConnectivity(data);
         updateAutotune(data);
@@ -442,6 +480,7 @@ void handleData() {
   doc["engineRunning"] = engine_running;
   doc["engineProbing"] = engine_probing;
   doc["overvoltageAlert"] = overvoltage_alert;
+  doc["engineSources"] = engineModeSettings.sources();
   doc["gpsConnected"] = gpsReader.isConnected();
   doc["gpsHasFix"] = gpsHasAcceptedFix;
   if (gpsHasAcceptedFix) {
@@ -450,6 +489,7 @@ void handleData() {
     doc["gpsLat"] = gpsJumpFilter.lastLat();
     doc["gpsLon"] = gpsJumpFilter.lastLon();
     doc["gpsSpeedKmh"] = gpsReader.speedKmh();
+    doc["gpsSpeedAvgKmh"] = gpsSpeedAvg.average(millis());
   }
 
   doc["wifiMode"] = wifiConnectedSta ? "sta" : "ap_fallback";
@@ -512,6 +552,14 @@ void handleAutotuneStart() {
 void handleMaintenanceReset() {
   usageCounters.resetMaintenanceCounter();
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleEngineSources() {
+  if (server.hasArg("mask")) {
+    long mask = server.arg("mask").toInt();
+    engineModeSettings.setSources(static_cast<uint8_t>(mask < 0 || mask > 255 ? 0 : mask)); // invalid -> default
+  }
+  server.send(200, "application/json", String("{\"sources\":") + engineModeSettings.sources() + "}");
 }
 
 void handleMaintenanceInterval() {

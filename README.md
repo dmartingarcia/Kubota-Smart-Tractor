@@ -236,6 +236,28 @@ it yet).
   socket timeout is capped at 1s to bound the worst case, but it isn't fully
   non-blocking. Acceptable given the cadence, but worth knowing.
 
+## Engine detection & charging logic 🔌
+Every PID cycle (20 ms), `manage_alternator()` first picks the voltage regime
+(`decide_pwm_safety_action`), then asks which sources may declare the engine on
+(`decide_engine_sources`, selected from the dashboard "Engine detection" card, persisted
+in `/engine_mode.bin`; any combination, empty falls back to GPS + alternator).
+
+| Source | Engine counts as on when |
+|---|---|
+| Always on | permanently (no probing) |
+| GPS | valid fresh fix and mean speed of the last 15s >= 3 km/h (`SpeedAverager`) |
+| Alternator | voltage in the PID band / over the cutoff, or a probe pulse shows a >= 0.05V rise |
+
+| Voltage | Action |
+|---|---|
+| >= 14.4V | field **off**, overvoltage alert latched 60s; engine on if "always"/"alternator" selected |
+| 13.0V - 14.4V | PID regulates to 14.0V (autotune swings output here); engine on if "always"/"alternator" selected |
+| <= 13.0V, engine forced on (always, or GPS moving) | field at **100%** immediately, no probing |
+| <= 13.0V, alternator source only | probe: 3s full-field pulse; rise >= 0.05V = running, else off for 8s (ends early if voltage rises 0.3V above rest); 15s grace after any sign of charging so sags at high RPM don't stop the drive |
+| <= 13.0V, only GPS selected and standing still | field off, engine off |
+
+The LED mirrors the final duty written to the field pin in every case.
+
 ## System Indicators 💡
 The status LED (`LED_PIN`, D4) replicates the alternator output PWM one-to-one: every
 duty written to the output pin is written, with the same value, to the LED
