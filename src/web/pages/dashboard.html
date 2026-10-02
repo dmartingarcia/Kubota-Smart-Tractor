@@ -132,6 +132,7 @@
       <div class="card">
         <h2>Connectivity</h2>
         <div class="row"><span class="label">WiFi</span><span class="pill" id="wifiMode">--</span></div>
+        <div class="row"><span class="label">Signal</span><span class="value" id="rssi">--</span></div>
         <div class="row"><span class="label">Home WiFi attempts</span><span class="value" id="staInfo">--</span></div>
         <div class="note">Home Assistant/MQTT only reachable while on home WiFi (STA); AP fallback is offline-only.</div>
       </div>
@@ -249,6 +250,9 @@
 
       function updateConnectivity(data) {
         setPill('wifiMode', Components.wifiMode(data.wifiMode));
+        // Rule of thumb for 2.4GHz: > -60 great, -60..-70 fine, -70..-80 flaky, < -80 drops packets.
+        setText('rssi', data.wifiMode === 'sta' && data.rssi < 0
+          ? data.rssi + ' dBm (' + (data.rssi > -60 ? 'great' : data.rssi > -70 ? 'good' : data.rssi > -80 ? 'weak' : 'very weak') + ')' : '--');
         const STA_FAIL = { 1: 'network not found', 4: 'connection failed (wrong password?)', 6: 'disconnected / rejected' };
         setText('staInfo', data.staAttempts + (data.staLastFail >= 0 && data.wifiMode !== 'sta'
           ? ' - last: ' + (STA_FAIL[data.staLastFail] || 'status ' + data.staLastFail) : ''));

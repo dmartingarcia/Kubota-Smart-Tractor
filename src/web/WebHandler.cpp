@@ -155,6 +155,7 @@ void handleData() {
   }
 
   doc[F("wifiMode")] = wifiConnectedSta ? "sta" : "ap_fallback";
+  doc[F("rssi")] = WiFi.RSSI(); // dBm; 0 when not on the home WiFi
   doc[F("staAttempts")] = staAttempts;
   doc[F("staLastFail")] = staLastFailStatus;
 
