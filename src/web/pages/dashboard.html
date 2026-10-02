@@ -142,12 +142,19 @@
         <div class="row"><span class="label">Speed</span><span class="value" id="gpsSpeed">--</span></div>
         <div class="row"><span class="label">Avg speed (15 s)</span><span class="value" id="gpsSpeedAvg">--</span></div>
         <div class="row"><span class="label">Session track</span><span class="value" id="trackInfo">--</span></div>
-        <canvas id="trackMap" style="width:100%; height:220px; display:block; border-radius:8px; background:var(--bg);"></canvas>
+        <div class="row"><span class="label">Map</span>
+          <select id="mapStyle" onchange="setMapStyle()">
+            <option value="osm">Street (OpenStreetMap)</option>
+            <option value="sat">Satellite (Esri)</option>
+            <option value="none">Track only (offline)</option>
+          </select>
+        </div>
+        <canvas id="trackMap" style="width:100%; height:260px; display:block; border-radius:8px; background:var(--bg);"></canvas>
         <div class="row" style="margin-top:8px;">
           <a href="/track.gpx" download="tractor-track.gpx"><button type="button">Download GPX</button></a>
           <button class="secondary" onclick="clearTrack()">Clear track</button>
         </div>
-        <div class="note">Recorded while moving (a point every 10 m or more, kept in RAM: it is lost when the board restarts, so download it before switching the engine off). North is up; no map tiles, so it works offline.</div>
+        <div class="note">Recorded while moving and saved in the board's flash, so it survives restarts until you clear it. Straight passes are stored as a few points and turns in detail. North is up. Map tiles are loaded by YOUR browser from the internet, so they only show when the device you browse from has internet (e.g. when the tractor is on your home WiFi); in the AP they are skipped and only the track is drawn.</div>
       </div>
 
       <div class="card">
@@ -267,6 +274,7 @@
       // GPS card is always visible: grey "no module" / "searching" states instead of hiding it.
       let trackPoints = [], trackFetchedAt = 0, lastGps = null;
       function updateGps(data) {
+        onHomeWifi = data.wifiMode === 'sta';
         lastGps = data.gpsHasFix ? [Math.round(data.gpsLat * 1e6), Math.round(data.gpsLon * 1e6)] : null;
         setPill('gpsStatus', data.gpsHasFix ? { text: 'FIX', cls: 'pill-good' }
           : data.gpsConnected ? { text: 'SEARCHING SATELLITES', cls: 'pill-warn' } : { text: 'NO GPS MODULE', cls: 'pill-bad' });
@@ -295,15 +303,49 @@
         trackPoints = []; trackFetchedAt = 0;
         fetchData();
       }
+      // --- Map: Web Mercator (the tile projection), tiles fetched by the browser, track on top. ---
+      const TILE_SOURCES = {
+        osm: { url: (z, x, y) => 'https://tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png', credit: '\u00A9 OpenStreetMap contributors' },
+        sat: { url: (z, x, y) => 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/' + z + '/' + y + '/' + x, credit: 'Tiles \u00A9 Esri' },
+      };
+      let mapStyle = localStorage.getItem('kubotio_map') || 'osm';
+      let onHomeWifi = false;
+      const tileCache = new Map();
+      let redrawTimer = null;
+      function setMapStyle() {
+        mapStyle = document.getElementById('mapStyle').value;
+        localStorage.setItem('kubotio_map', mapStyle);
+        drawTrack();
+      }
+      function scheduleRedraw() { if (!redrawTimer) redrawTimer = setTimeout(() => { redrawTimer = null; drawTrack(); }, 60); }
+      function worldXY(latE6, lonE6, z) {            // pixel in the 256*2^z world
+        const n = 256 * Math.pow(2, z), lat = latE6 / 1e6 * Math.PI / 180;
+        return [(lonE6 / 1e6 + 180) / 360 * n, (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n];
+      }
+      function tileFor(style, z, x, y) {
+        const key = style + '/' + z + '/' + x + '/' + y;
+        let t = tileCache.get(key);
+        if (!t) {
+          t = { img: new Image(), ok: false };
+          t.img.onload = () => { t.ok = true; scheduleRedraw(); };
+          t.img.onerror = () => { t.failed = true; };
+          t.img.referrerPolicy = 'strict-origin-when-cross-origin';
+          t.img.src = TILE_SOURCES[style].url(z, x, y);
+          if (tileCache.size > 80) tileCache.delete(tileCache.keys().next().value);  // bounded memory
+          tileCache.set(key, t);
+        }
+        return t;
+      }
       function drawTrack() {
         const canvas = document.getElementById('trackMap');
+        document.getElementById('mapStyle').value = mapStyle;
         const dpr = window.devicePixelRatio || 1;
-        const w = canvas.clientWidth || 300, h = 220;
+        const w = canvas.clientWidth || 300, h = 260;
         canvas.width = w * dpr; canvas.height = h * dpr;
         const ctx = canvas.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
-        const pts = lastGps && trackPoints.length ? trackPoints.concat([lastGps]) : trackPoints.slice();
+        const pts = (lastGps && trackPoints.length ? trackPoints.concat([lastGps]) : trackPoints.slice()).filter(p => p); // null = new session
         ctx.fillStyle = cssVar('--label'); ctx.font = '12px sans-serif';
         if (!pts.length) {
           ctx.textAlign = 'center';
@@ -312,21 +354,63 @@
         }
         let la0 = Infinity, la1 = -Infinity, lo0 = Infinity, lo1 = -Infinity;
         pts.forEach(p => { la0 = Math.min(la0, p[0]); la1 = Math.max(la1, p[0]); lo0 = Math.min(lo0, p[1]); lo1 = Math.max(lo1, p[1]); });
-        const midLat = (la0 + la1) / 2e6, kx = Math.cos(midLat * Math.PI / 180);
-        const spanX = Math.max((lo1 - lo0) * kx, 500), spanY = Math.max(la1 - la0, 500); // >= ~55 m so a single point isn't zoomed to infinity
-        const pad = 16, scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
-        const cx = (lo0 + lo1) / 2, cy = (la0 + la1) / 2;
-        const X = p => w / 2 + (p[1] - cx) * kx * scale, Y = p => h / 2 - (p[0] - cy) * scale;
-        ctx.strokeStyle = cssVar('--accent'); ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
-        trackPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p), Y(p)); else ctx.lineTo(X(p), Y(p)); });
-        ctx.stroke();
-        const dot = (p, color) => { ctx.beginPath(); ctx.arc(X(p), Y(p), 5, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill(); };
-        if (trackPoints.length) dot(trackPoints[0], cssVar('--good'));
+
+        // Largest integer zoom where the whole track fits (a lone point gets street level).
+        const pad = 24;
+        let z = 17;
+        for (let zz = 19; zz >= 3; zz--) {
+          const a = worldXY(la0, lo0, zz), b = worldXY(la1, lo1, zz);
+          if (Math.abs(b[0] - a[0]) <= w - 2 * pad && Math.abs(b[1] - a[1]) <= h - 2 * pad) { z = Math.min(zz, 18); break; }
+        }
+        const c0 = worldXY(la0, lo0, z), c1 = worldXY(la1, lo1, z);
+        const cx = (c0[0] + c1[0]) / 2, cy = (c0[1] + c1[1]) / 2;
+        const ox = cx - w / 2, oy = cy - h / 2;               // world pixel at the canvas origin
+        const toCanvas = p => { const q = worldXY(p[0], p[1], z); return [q[0] - ox, q[1] - oy]; };
+
+        // Tiles only when asked for AND on the home WiFi (the browser then has internet).
+        const useTiles = mapStyle !== 'none' && onHomeWifi && navigator.onLine !== false;
+        if (useTiles) {
+          for (let tx = Math.floor(ox / 256); tx <= Math.floor((ox + w) / 256); tx++) {
+            for (let ty = Math.floor(oy / 256); ty <= Math.floor((oy + h) / 256); ty++) {
+              if (ty < 0 || tx < 0 || ty >= Math.pow(2, z) || tx >= Math.pow(2, z)) continue;
+              const t = tileFor(mapStyle, z, tx, ty);
+              if (t.ok) ctx.drawImage(t.img, tx * 256 - ox, ty * 256 - oy, 256, 256);
+            }
+          }
+        }
+        // Track: dark halo under the line so it reads on both light streets and satellite.
+        const line = (color, width) => {
+          ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.beginPath();
+          let penDown = false;
+          trackPoints.forEach(p => {
+            if (!p) { penDown = false; return; }               // session break: lift the pen
+            const q = toCanvas(p);
+            if (penDown) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]);
+            penDown = true;
+          });
+          ctx.stroke();
+        };
+        if (trackPoints.length) { line('rgba(0,0,0,0.55)', 5.5); line(cssVar('--accent'), 3); }
+        const dot = (p, color) => {
+          const q = toCanvas(p);
+          ctx.beginPath(); ctx.arc(q[0], q[1], 6, 0, 2 * Math.PI); ctx.fillStyle = '#fff'; ctx.fill();
+          ctx.beginPath(); ctx.arc(q[0], q[1], 4.5, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill();
+        };
+        const firstPoint = trackPoints.find(p => p);
+        if (firstPoint) dot(firstPoint, cssVar('--good'));
         if (lastGps) dot(lastGps, cssVar('--warn'));
-        ctx.fillStyle = cssVar('--label'); ctx.textAlign = 'left';
-        ctx.fillText('N \u2191', 8, 16);
-        const widthM = Math.round(spanX / 1e6 * 111195);
-        ctx.textAlign = 'right'; ctx.fillText('\u2248 ' + widthM + ' m wide', w - 8, 16);
+
+        // Labels on a translucent plate so they stay readable over tiles.
+        const label = (text, x, y, align) => {
+          ctx.font = '11px sans-serif'; ctx.textAlign = align;
+          const tw = ctx.measureText(text).width;
+          ctx.fillStyle = 'rgba(255,255,255,0.75)';
+          ctx.fillRect(align === 'left' ? x - 4 : x - tw - 4, y - 11, tw + 8, 15);
+          ctx.fillStyle = '#222'; ctx.fillText(text, x, y);
+        };
+        label('N \u2191', 8, 16, 'left');
+        if (useTiles) label(TILE_SOURCES[mapStyle].credit, w - 6, h - 6, 'right');
+        else if (mapStyle !== 'none') label(onHomeWifi ? 'Map tiles unavailable' : 'Offline: track only', w - 6, h - 6, 'right');
       }
 
       let calFrozen = false;

@@ -26,7 +26,8 @@
 #include "gps/GpsReader.h"
 #include "gps/GpsJumpFilter.h"
 #include "gps/SpeedAverager.h"
-#include "gps/GpsTrack.h"
+#include "gps/TrackRecorder.h"
+#include "gps/LittleFsTrackStore.h"
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -226,12 +227,15 @@ GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 GpsJumpFilter gpsJumpFilter(60.0, 3);
 SpeedAverager gpsSpeedAvg(ENGINE_GPS_AVG_WINDOW_MS, 1000);
 
-// Where the tractor has been this session (RAM only: the board restarts with the ignition).
-// A point is recorded every >= 10 m while moving; viewable on the dashboard, downloadable as GPX.
-#define TRACK_MIN_DISTANCE_M   10.0
+// Where the tractor has been, saved in flash (survives restarts until cleared). Online line
+// simplification: straight passes cost a couple of points, turns are kept in detail (see
+// TrackRecorder). Viewable on the dashboard map, downloadable as GPX.
 #define TRACK_MIN_SPEED_KMH    1.5   // below this it's parked jitter, not driving
-GpsTrack gpsTrack(TRACK_MIN_DISTANCE_M);
+#define TRACK_FLUSH_INTERVAL_MS 30000 // pending points reach flash at least this often
+LittleFsTrackStore trackStore("/track.bin");
+TrackRecorder trackRecorder(trackStore);
 unsigned long lastTrackSample = 0;
+unsigned long lastTrackFlush = 0;
 
 // User one-point voltage calibration (typed in from a multimeter on the dashboard), applied on
 // top of the fixed divider calibration. unscaledVoltage is the reading BEFORE that scale, which
@@ -308,6 +312,7 @@ void setup() {
   engineModeSettings.begin();
   voltageCalibration.begin();
   pidSettings.begin();
+  trackRecorder.begin();
   PidGains pidStart = pidSettings.gains();
   chargePID.setTunings(pidStart.kp, pidStart.ki, pidStart.kd);
   gpsReader.begin();
@@ -561,7 +566,11 @@ void loop() {
   else gpsHasAcceptedFix = false; // fix lost: stop showing a stale position/speed
   if(gpsHasAcceptedFix && gpsReader.speedKmh() >= TRACK_MIN_SPEED_KMH && currentMillis - lastTrackSample >= 1000) {
     lastTrackSample = currentMillis;
-    gpsTrack.add(gpsJumpFilter.lastLat(), gpsJumpFilter.lastLon(), gpsReader.epochUtc());
+    trackRecorder.add(gpsJumpFilter.lastLat(), gpsJumpFilter.lastLon(), gpsReader.epochUtc());
+  }
+  if(currentMillis - lastTrackFlush >= TRACK_FLUSH_INTERVAL_MS) {
+    lastTrackFlush = currentMillis;
+    trackRecorder.flush();
   }
 
   ArduinoOTA.handle();

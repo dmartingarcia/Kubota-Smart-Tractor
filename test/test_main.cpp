@@ -15,8 +15,10 @@
 #include "../src/gps/GpsJumpFilter.h"
 #include "../src/gps/SpeedAverager.h"
 #include "../src/gps/GpsTrack.h"
+#include "../src/gps/TrackRecorder.h"
 #include <string.h>
 #include <string>
+#include <math.h>
 #include <vector>
 
 void setUp() {}
@@ -1028,54 +1030,6 @@ void test_pid_settings_corrupt_blob_falls_back_to_factory() {
     TEST_ASSERT_EQUAL_DOUBLE(30, b.gains().kp);
 }
 
-void test_track_records_first_point_and_ignores_jitter() {
-    GpsTrack t(10.0);
-    TEST_ASSERT_TRUE(t.add(41.0, 2.0, 0));
-    TEST_ASSERT_FALSE(t.add(41.00005, 2.0, 0));      // ~5.5m: parked jitter
-    TEST_ASSERT_TRUE(t.add(41.0002, 2.0, 0));        // ~22m
-    TEST_ASSERT_EQUAL(2, static_cast<int>(t.size()));
-}
-
-void test_track_accumulates_distance() {
-    GpsTrack t(10.0);
-    t.add(41.000, 2.0, 0);
-    t.add(41.001, 2.0, 0);
-    t.add(41.002, 2.0, 0);
-    TEST_ASSERT_DOUBLE_WITHIN(1.0, 222.39, t.distanceMeters());   // 2 x 0.001deg of latitude
-    TEST_ASSERT_EQUAL_INT32(41000000, t.at(0).latE6);
-    TEST_ASSERT_EQUAL_INT32(41002000, t.at(2).latE6);
-}
-
-void test_track_longitude_distance_shrinks_with_latitude() {
-    GpsTrack equator(1.0), north(1.0);
-    equator.add(0.0, 0.0, 0);   equator.add(0.0, 0.001, 0);
-    north.add(60.0, 0.0, 0);    north.add(60.0, 0.001, 0);
-    TEST_ASSERT_DOUBLE_WITHIN(1.0, 111.19, equator.distanceMeters());
-    TEST_ASSERT_DOUBLE_WITHIN(1.0, 55.6, north.distanceMeters());  // cos(60) = 0.5
-}
-
-void test_track_halves_and_doubles_spacing_when_full() {
-    GpsTrack t(10.0);
-    for (size_t i = 0; i < GpsTrack::kCapacity; i++) t.add(41.0 + i * 0.0002, 2.0, 0);   // ~22m apart
-    TEST_ASSERT_EQUAL(static_cast<int>(GpsTrack::kCapacity), static_cast<int>(t.size()));
-    TEST_ASSERT_TRUE(t.add(41.0 + GpsTrack::kCapacity * 0.0002, 2.0, 0));                // one more -> compaction
-    TEST_ASSERT_EQUAL(static_cast<int>(GpsTrack::kCapacity / 2 + 1), static_cast<int>(t.size()));
-    TEST_ASSERT_EQUAL_DOUBLE(20.0, t.minDistanceMeters());
-    TEST_ASSERT_EQUAL_INT32(41000000, t.at(0).latE6);                                    // session start kept
-    TEST_ASSERT_DOUBLE_WITHIN(5.0, 500 * 22.24, t.distanceMeters());                     // true length survives
-    TEST_ASSERT_FALSE(t.add(41.0 + GpsTrack::kCapacity * 0.0002 + 0.00015, 2.0, 0));     // 16m < 20m now
-}
-
-void test_track_clear_resets_everything() {
-    GpsTrack t(10.0);
-    t.add(41.0, 2.0, 0);
-    t.add(41.001, 2.0, 0);
-    t.clear();
-    TEST_ASSERT_EQUAL(0, static_cast<int>(t.size()));
-    TEST_ASSERT_EQUAL_DOUBLE(0.0, t.distanceMeters());
-    TEST_ASSERT_TRUE(t.add(41.0, 2.0, 0));                                               // first point again
-}
-
 void test_utc_to_epoch() {
     TEST_ASSERT_EQUAL_UINT32(1790944496UL, utc_to_epoch(2026, 10, 2, 12, 34, 56));
     TEST_ASSERT_EQUAL_UINT32(0UL, utc_to_epoch(1970, 1, 1, 0, 0, 0));
@@ -1109,15 +1063,180 @@ void test_gpx_document_is_well_formed_xml_wrapper() {
     TEST_ASSERT_NOT_NULL(strstr(kGpxHeader, "<gpx"));
     TEST_ASSERT_NOT_NULL(strstr(kGpxHeader, "<trkseg>"));
     TEST_ASSERT_EQUAL_STRING("</trkseg></trk></gpx>\n", kGpxFooter);
+    TEST_ASSERT_EQUAL_STRING("</trkseg>\n<trkseg>\n", kGpxSegmentBreak);
+}
+
+class InMemoryTrackStore : public ITrackStore {
+  public:
+    std::vector<TrackPoint> pts;
+    int appendCalls = 0;
+    size_t count() override { return pts.size(); }
+    bool append(const TrackPoint* p, size_t n) override { appendCalls++; pts.insert(pts.end(), p, p + n); return true; }
+    size_t read(size_t first, TrackPoint* out, size_t maxPoints) override {
+        size_t n = 0;
+        for (size_t i = first; i < pts.size() && n < maxPoints; i++) out[n++] = pts[i];
+        return n;
+    }
+    void clear() override { pts.clear(); }
+};
+
+// All points of the unified (stored + pending + head) view.
+std::vector<TrackPoint> track_all(const TrackRecorder& r) {
+    std::vector<TrackPoint> all(r.size());
+    if (!all.empty()) r.read(0, all.data(), all.size());
+    return all;
+}
+
+// 0.00001 degrees of latitude is 1.1119 m.
+const double kStepDeg = 0.00001;
+
+void test_cross_track_distance() {
+    TrackPoint a{0, 0, 0}, b{1000, 0, 0}, p{500, 100, 0};            // line north, p 100e-6 deg (11.1m) east
+    TEST_ASSERT_DOUBLE_WITHIN(0.1, 11.12, track_cross_track_meters(a, b, p));
+    TEST_ASSERT_DOUBLE_WITHIN(0.1, 11.12, track_cross_track_meters(a, a, TrackPoint{0, 100, 0})); // degenerate: distance to a
+}
+
+void test_turn_angle() {
+    TrackPoint a{0, 0, 0}, b{1000, 0, 0};
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, track_turn_angle_degrees(a, b, TrackPoint{2000, 0, 0}));      // straight on
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 90.0, track_turn_angle_degrees(a, b, TrackPoint{1000, 1000, 0}));   // right angle (equator: 1:1)
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 180.0, track_turn_angle_degrees(a, b, a));                          // reversal
+}
+
+void test_recorder_straight_pass_costs_a_few_points() {
+    InMemoryTrackStore store;
+    TrackRecorder r(store);
+    r.begin();
+    for (int i = 0; i <= 100; i++) r.add(41.0 + i * 3 * kStepDeg / 1.1119 * 1.1119, 2.0, 0); // ~300 m north, 3.3 m steps
+    auto pts = track_all(r);
+    TEST_ASSERT_TRUE(pts.size() <= 10);                              // break + anchor + ~5 segments + head
+    TEST_ASSERT_TRUE(pts.size() >= 4);
+    TEST_ASSERT_DOUBLE_WITHIN(8.0, 333.0, r.distanceMeters());       // true length, not the simplified one
+}
+
+void test_recorder_keeps_the_corner() {
+    InMemoryTrackStore store;
+    TrackRecorder r(store);
+    r.begin();
+    double lat = 41.0, lon = 2.0;
+    for (int i = 0; i < 40; i++) { r.add(lat, lon, 0); lat += 3 * kStepDeg; }          // ~133 m north
+    double cornerLat = lat;
+    for (int i = 0; i < 40; i++) { lon += 3 * kStepDeg / 0.7547; r.add(lat, lon, 0); } // ~133 m east
+    bool nearCorner = false;
+    for (const auto& p : track_all(r))
+        if (!is_segment_break(p) && track_distance_meters(p.latE6, p.lonE6, static_cast<int32_t>(cornerLat * 1e6), 2000000) < 6.0) nearCorner = true;
+    TEST_ASSERT_TRUE(nearCorner);                                    // the 90 degree turn survives simplification
+}
+
+void test_recorder_stores_a_u_turn_in_detail() {
+    InMemoryTrackStore store;
+    TrackRecorder r(store);
+    r.begin();
+    const double radiusM = 15.0, pi = 3.14159265358979;
+    for (int i = 0; i <= 30; i++) {                                  // semicircle, ~3 m per step
+        double ang = pi * i / 30.0;
+        r.add(41.0 + radiusM * sin(ang) / 111195.0, 2.0 + radiusM * (1 - cos(ang)) / (111195.0 * 0.7547), 0);
+    }
+    TEST_ASSERT_TRUE(track_all(r).size() >= 7);                      // a straight pass of the same length is <= 4
+}
+
+void test_recorder_ignores_gps_jitter_when_parked() {
+    InMemoryTrackStore store;
+    TrackRecorder r(store);
+    r.begin();
+    r.add(41.0, 2.0, 0);
+    for (int i = 0; i < 50; i++) r.add(41.0 + (i % 2) * 0.000012, 2.0, 0);  // +-1.3 m wobble
+    TEST_ASSERT_EQUAL(2, static_cast<int>(r.size()));                // break + first point only
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, r.distanceMeters());
+}
+
+void test_recorder_flushes_in_batches() {
+    InMemoryTrackStore store;
+    TrackConfig cfg; cfg.flushEvery = 4;
+    TrackRecorder r(store, cfg);
+    r.begin();
+    for (int i = 0; i < 40; i++) r.add(41.0 + i * 0.0004, 2.0 + (i % 2) * 0.0004, 0);   // zig-zag: every point is a corner
+    TEST_ASSERT_TRUE(store.appendCalls >= 5);
+    TEST_ASSERT_TRUE(store.appendCalls < 40);                        // batched, not one flash write per point
+    size_t viewSize = r.size();
+    r.flush();
+    TEST_ASSERT_EQUAL(static_cast<int>(viewSize), static_cast<int>(store.pts.size() + 1)); // + the head (not stored until it becomes a corner)
+}
+
+void test_recorder_session_break_after_reboot() {
+    InMemoryTrackStore store;
+    {
+        TrackRecorder first(store);
+        first.begin();
+        for (int i = 0; i < 20; i++) first.add(41.0 + i * 0.0004, 2.0, 0);
+        first.flush();
+    }
+    TrackRecorder second(store);                                     // "reboot": same flash, new object
+    second.begin();
+    size_t before = second.size();
+    TEST_ASSERT_TRUE(before > 2);                                    // previous session still there
+    TEST_ASSERT_TRUE(second.distanceMeters() > 500.0);                // recomputed from flash
+    second.add(41.5, 2.5, 0);                                        // far away: tomorrow, other field
+    auto pts = track_all(second);
+    int breaks = 0;
+    for (const auto& p : pts) breaks += is_segment_break(p);
+    TEST_ASSERT_EQUAL(2, breaks);                                    // one per session
+    TEST_ASSERT_TRUE(is_segment_break(pts[0]));
+}
+
+void test_recorder_respects_max_points_but_keeps_measuring() {
+    InMemoryTrackStore store;
+    TrackConfig cfg; cfg.maxPoints = 10; cfg.flushEvery = 2;
+    TrackRecorder r(store, cfg);
+    r.begin();
+    for (int i = 0; i < 200; i++) r.add(41.0 + i * 0.0004, 2.0 + (i % 2) * 0.0004, 0);
+    r.flush();
+    TEST_ASSERT_TRUE(r.full());
+    TEST_ASSERT_TRUE(store.pts.size() <= 10);
+    TEST_ASSERT_TRUE(r.distanceMeters() > 5000.0);                   // distance keeps counting
+}
+
+void test_recorder_clear_starts_fresh() {
+    InMemoryTrackStore store;
+    TrackRecorder r(store);
+    r.begin();
+    for (int i = 0; i < 20; i++) r.add(41.0 + i * 0.0004, 2.0, 0);
+    r.flush();
+    r.clear();
+    TEST_ASSERT_EQUAL(0, static_cast<int>(r.size()));
+    TEST_ASSERT_EQUAL(0, static_cast<int>(store.pts.size()));
+    TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, r.distanceMeters());
+    r.add(41.0, 2.0, 0);
+    TEST_ASSERT_TRUE(is_segment_break(track_all(r)[0]));             // fresh break after a clear
+}
+
+void test_recorder_read_is_a_consistent_window() {
+    InMemoryTrackStore store;
+    TrackConfig cfg; cfg.flushEvery = 4;
+    TrackRecorder r(store, cfg);
+    r.begin();
+    for (int i = 0; i < 30; i++) r.add(41.0 + i * 0.0004, 2.0 + (i % 2) * 0.0004, 0);
+    auto all = track_all(r);
+    TrackPoint window[5];
+    size_t n = r.read(3, window, 5);
+    TEST_ASSERT_EQUAL(5, static_cast<int>(n));
+    for (size_t i = 0; i < n; i++) TEST_ASSERT_EQUAL_INT32(all[3 + i].latE6, window[i].latE6);
+    TEST_ASSERT_EQUAL(0, static_cast<int>(r.read(all.size(), window, 5)));   // past the end
 }
 
 int main(int argc, char **argv) {
     UNITY_BEGIN();
-    RUN_TEST(test_track_records_first_point_and_ignores_jitter);
-    RUN_TEST(test_track_accumulates_distance);
-    RUN_TEST(test_track_longitude_distance_shrinks_with_latitude);
-    RUN_TEST(test_track_halves_and_doubles_spacing_when_full);
-    RUN_TEST(test_track_clear_resets_everything);
+    RUN_TEST(test_cross_track_distance);
+    RUN_TEST(test_turn_angle);
+    RUN_TEST(test_recorder_straight_pass_costs_a_few_points);
+    RUN_TEST(test_recorder_keeps_the_corner);
+    RUN_TEST(test_recorder_stores_a_u_turn_in_detail);
+    RUN_TEST(test_recorder_ignores_gps_jitter_when_parked);
+    RUN_TEST(test_recorder_flushes_in_batches);
+    RUN_TEST(test_recorder_session_break_after_reboot);
+    RUN_TEST(test_recorder_respects_max_points_but_keeps_measuring);
+    RUN_TEST(test_recorder_clear_starts_fresh);
+    RUN_TEST(test_recorder_read_is_a_consistent_window);
     RUN_TEST(test_utc_to_epoch);
     RUN_TEST(test_epoch_to_iso8601_roundtrip);
     RUN_TEST(test_gpx_point_with_and_without_time);
