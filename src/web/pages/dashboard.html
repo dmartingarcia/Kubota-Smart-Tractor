@@ -94,6 +94,17 @@
       </div>
 
       <div class="card">
+        <h2>Voltage calibration</h2>
+        <div class="row"><span class="label">Device reads</span><span class="value" id="calReading">--</span></div>
+        <div class="row"><span class="label">Scale factor</span><span class="value" id="calScale">--</span></div>
+        <div class="row"><span class="label">Multimeter reads</span>
+          <span><input type="number" id="calInput" step="0.01" min="6" max="20" placeholder="13.80"> V <button onclick="calibrateVoltage()">Calibrate</button></span>
+        </div>
+        <button class="secondary" onclick="resetCalibration()">Reset to factory</button>
+        <div class="note" id="calMsg">Measure at the battery terminals with the voltage stable, type the multimeter reading and press Calibrate. Asks for user <b>admin</b> and the AP password.</div>
+      </div>
+
+      <div class="card">
         <h2>System</h2>
         <div class="bar"><div class="bar-fill" id="heapFill" style="width:0%;"></div></div>
         <div class="row"><span class="label">RAM used</span><span class="value" id="heapValue">--</span></div>
@@ -249,7 +260,26 @@
         setText('engineGpsAvg', data.gpsHasFix ? data.gpsSpeedAvgKmh.toFixed(1) + ' km/h' : 'no fix');
       }
 
+      function updateCalibration(data) {
+        setText('calReading', Fmt.volts(data.voltage));
+        setText('calScale', data.voltageScale.toFixed(4) + (data.voltageScale === 1 ? ' (factory)' : ''));
+      }
+      async function calibrateVoltage() {
+        const volts = document.getElementById('calInput').value;
+        const res = await fetch('/voltage/calibrate?volts=' + encodeURIComponent(volts));
+        const body = await res.json().catch(() => ({}));
+        setText('calMsg', res.ok ? 'Calibrated. New scale ' + body.scale : (body.error || 'Calibration failed'));
+        if (res.ok) document.getElementById('calInput').value = '';
+        fetchData();
+      }
+      async function resetCalibration() {
+        await fetch('/voltage/calibrate?reset=1');
+        setText('calMsg', 'Back to the factory calibration.');
+        fetchData();
+      }
+
       function updateAutotune(data) {
+        setText('pidGains', data.pidKp.toFixed(2) + ' / ' + data.pidKi.toFixed(2) + ' / ' + data.pidKd.toFixed(2));
         setPill('autotuneStatus', Components.autotuneStatus(data.autotuneActive));
         document.getElementById('autotuneBtn').disabled = data.autotuneActive;
       }
@@ -311,6 +341,7 @@
       function updateStatus(data) {
         updateEngineSources(data);
         updateFault(data);
+        updateCalibration(data);
         updateChargingStatus(data);
         updateConnectivity(data);
         updateAutotune(data);

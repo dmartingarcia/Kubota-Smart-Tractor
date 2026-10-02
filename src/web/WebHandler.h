@@ -37,6 +37,7 @@ void handleMaintenanceLogAdd();
 void handleRestart();
 void handleMqttTest();
 void handleEngineSources();
+void handleVoltageCalibration();
 
 void setupWebServer();
 void handleRoot();

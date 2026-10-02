@@ -11,6 +11,7 @@
 #include "charging/AlternatorLogic.h"
 #include "charging/EngineDetector.h"
 #include "charging/EngineMode.h"
+#include "charging/VoltageCalibration.h"
 #include "charging/PwmMirror.h"
 #include "charging/StatusLed.h"
 #include "charging/PidAutotuner.h"
@@ -195,6 +196,13 @@ GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 GpsJumpFilter gpsJumpFilter(60.0, 3);
 SpeedAverager gpsSpeedAvg(ENGINE_GPS_AVG_WINDOW_MS, 1000);
 
+// User one-point voltage calibration (typed in from a multimeter on the dashboard), applied on
+// top of the fixed divider calibration. unscaledVoltage is the reading BEFORE that scale, which
+// is what the calibration is computed against.
+LittleFsStore voltageCalStore("/voltage_cal.bin");
+VoltageCalibration voltageCalibration(voltageCalStore);
+float unscaledVoltage = 0;
+
 // Which signals may declare "engine on" (always / GPS motion / alternator probing, any
 // combination), user-selectable from the dashboard and persisted.
 LittleFsStore engineModeStore("/engine_mode.bin");
@@ -261,6 +269,7 @@ void setup() {
   setupWebServer();
   usageCounters.begin(millis());
   engineModeSettings.begin();
+  voltageCalibration.begin();
   gpsReader.begin();
 
   // Best-effort NTP sync (non-blocking): only resolves once/if STA has internet.
@@ -276,7 +285,8 @@ float read_voltage() {
   }
 
   // Median, not mean: alternator ripple/spikes at high RPM must not move the reading.
-  return calibrate_voltage(median_reading(samples, SAMPLES), 1024.0, 3.3, CALIBRATION_IN_VOLTAGE, CALIBRATION_A0_VOLTAGE);
+  unscaledVoltage = calibrate_voltage(median_reading(samples, SAMPLES), 1024.0, 3.3, CALIBRATION_IN_VOLTAGE, CALIBRATION_A0_VOLTAGE);
+  return unscaledVoltage * voltageCalibration.scale();
 }
 
 int lastTargetPWM = 0;

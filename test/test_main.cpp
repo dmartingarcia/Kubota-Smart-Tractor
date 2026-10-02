@@ -7,6 +7,7 @@
 #include "../src/charging/StatusLed.h"
 #include "../src/charging/RealTimePid.h"
 #include "../src/charging/EngineMode.h"
+#include "../src/charging/VoltageCalibration.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
@@ -877,8 +878,75 @@ void test_pid_hold_at_zero_after_cutoff_starts_from_nothing() {
     TEST_ASSERT_EQUAL_DOUBLE(0, out);                           // no stale 100% integral -> no new overshoot
 }
 
+void test_voltage_scale_from_multimeter_reading() {
+    float scale = 0;
+    TEST_ASSERT_TRUE(compute_voltage_scale(13.8f, 14.0f, &scale));   // device says 14.00, multimeter 13.8
+    TEST_ASSERT_FLOAT_WITHIN(0.0001, 0.98571f, scale);
+}
+
+void test_voltage_scale_rejects_implausible_input() {
+    float scale = 1.0f;
+    TEST_ASSERT_FALSE(compute_voltage_scale(5.0f, 5.0f, &scale));    // reference outside 6-20V
+    TEST_ASSERT_FALSE(compute_voltage_scale(21.0f, 20.0f, &scale));
+    TEST_ASSERT_FALSE(compute_voltage_scale(13.8f, 0.5f, &scale));   // nothing read
+    TEST_ASSERT_FALSE(compute_voltage_scale(10.0f, 14.0f, &scale));  // 29% off: wiring, not drift
+    TEST_ASSERT_FALSE(compute_voltage_scale(18.0f, 12.0f, &scale));
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, scale);                            // untouched on rejection
+}
+
+void test_voltage_calibration_persists_across_reboot() {
+    InMemoryFlashStore store;
+    VoltageCalibration a(store);
+    a.begin();
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, a.scale());
+    TEST_ASSERT_TRUE(a.calibrate(13.8f, 14.0f));
+    VoltageCalibration b(store);                                     // "reboot"
+    b.begin();
+    TEST_ASSERT_FLOAT_WITHIN(0.0001, 0.98571f, b.scale());
+}
+
+void test_voltage_calibration_rejected_keeps_previous_and_does_not_write() {
+    InMemoryFlashStore store;
+    VoltageCalibration c(store);
+    c.begin();
+    c.calibrate(13.8f, 14.0f);
+    int writes = store.writeCalls;
+    TEST_ASSERT_FALSE(c.calibrate(3.0f, 14.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.0001, 0.98571f, c.scale());
+    TEST_ASSERT_EQUAL_INT(writes, store.writeCalls);
+}
+
+void test_voltage_calibration_reset() {
+    InMemoryFlashStore store;
+    VoltageCalibration c(store);
+    c.begin();
+    c.reset();                                                       // already 1.0: no write
+    TEST_ASSERT_EQUAL_INT(0, store.writeCalls);
+    c.calibrate(13.8f, 14.0f);
+    c.reset();
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, c.scale());
+    VoltageCalibration d(store);
+    d.begin();
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, d.scale());
+}
+
+void test_pid_exposes_current_tunings() {
+    RealTimePid pid(30, 3, 1, 0, 1023);
+    TEST_ASSERT_EQUAL_DOUBLE(30, pid.kp());
+    pid.setTunings(12.5, 0.4, 2.0);                                  // e.g. after autotune
+    TEST_ASSERT_EQUAL_DOUBLE(12.5, pid.kp());
+    TEST_ASSERT_EQUAL_DOUBLE(0.4, pid.ki());
+    TEST_ASSERT_EQUAL_DOUBLE(2.0, pid.kd());
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_pid_exposes_current_tunings);
+    RUN_TEST(test_voltage_scale_from_multimeter_reading);
+    RUN_TEST(test_voltage_scale_rejects_implausible_input);
+    RUN_TEST(test_voltage_calibration_persists_across_reboot);
+    RUN_TEST(test_voltage_calibration_rejected_keeps_previous_and_does_not_write);
+    RUN_TEST(test_voltage_calibration_reset);
     RUN_TEST(test_pid_hold_at_max_keeps_output_at_100_percent_on_band_entry);
     RUN_TEST(test_pid_hold_after_long_gap_does_not_jump);
     RUN_TEST(test_pid_hold_at_zero_after_cutoff_starts_from_nothing);

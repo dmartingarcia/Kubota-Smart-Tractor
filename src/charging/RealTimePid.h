@@ -14,6 +14,9 @@ class RealTimePid {
     RealTimePid(double kp, double ki, double kd, double outputMin, double outputMax);
 
     void setTunings(double kp, double ki, double kd);
+    double kp() const { return kp_; }
+    double ki() const { return ki_; }
+    double kd() const { return kd_; }
 
     // setpoint/input in the caller's units; currentMillis for real elapsed-time scaling.
     // First call after construction/reset() has no valid dt yet and returns 0.

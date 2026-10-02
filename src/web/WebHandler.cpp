@@ -3,6 +3,8 @@
 #include "../charging/output_component.h"
 #include "../charging/EngineMode.h"
 #include "../charging/StatusLed.h"
+#include "../charging/VoltageCalibration.h"
+#include "../charging/RealTimePid.h"
 #include "../connectivity/MqttPublisher.h"
 #include "../gps/GpsReader.h"
 #include "../gps/GpsJumpFilter.h"
@@ -38,6 +40,9 @@ extern const char* mqtt_host;
 extern GpsReader gpsReader;
 extern EngineModeSettings engineModeSettings;
 extern SpeedAverager gpsSpeedAvg;
+extern VoltageCalibration voltageCalibration;
+extern float unscaledVoltage;
+extern RealTimePid chargePID;
 extern LedFault activeFault;
 extern LedFault lastFault;
 extern unsigned long lastFaultMillis;
@@ -75,6 +80,7 @@ void setupWebServer() {
     server.on("/restart", guarded(handleRestart)); // remote recovery when there's no physical/USB access
     server.on("/mqtt/test", guarded(handleMqttTest));
     server.on("/engine/sources", guarded(handleEngineSources));
+    server.on("/voltage/calibrate", guarded(handleVoltageCalibration));
     server.onNotFound(handleNotFound); // captive portal: unknown host/path -> redirect to the dashboard
     server.collectHeaders("If-None-Match");
     server.begin();
@@ -117,6 +123,10 @@ void handleData() {
   doc["engineProbing"] = engine_probing;
   doc["overvoltageAlert"] = overvoltage_alert;
   doc["engineSources"] = engineModeSettings.sources();
+  doc["voltageScale"] = voltageCalibration.scale();
+  doc["pidKp"] = chargePID.kp();
+  doc["pidKi"] = chargePID.ki();
+  doc["pidKd"] = chargePID.kd();
   doc["fault"] = static_cast<int>(activeFault);  // LED blink code, 0 = none
   doc["lastFault"] = static_cast<int>(lastFault);
   doc["lastFaultAgoS"] = (millis() - lastFaultMillis) / 1000;
@@ -206,6 +216,21 @@ void handleAutotuneStart() {
 void handleMaintenanceReset() {
   usageCounters.resetMaintenanceCounter();
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// /voltage/calibrate?volts=13.8  -> scale = multimeter reading / what the device currently reads
+// /voltage/calibrate?reset=1     -> back to the factory divider calibration
+void handleVoltageCalibration() {
+  if (server.hasArg("reset")) {
+    voltageCalibration.reset();
+  } else if (server.hasArg("volts")) {
+    if (!voltageCalibration.calibrate(server.arg("volts").toFloat(), unscaledVoltage)) {
+      server.send(400, "application/json",
+                  "{\"ok\":false,\"error\":\"Reading rejected: must be 6-20V and within 20% of what the device measures\"}");
+      return;
+    }
+  }
+  server.send(200, "application/json", String("{\"ok\":true,\"scale\":") + String(voltageCalibration.scale(), 4) + "}");
 }
 
 void handleEngineSources() {
