@@ -58,10 +58,17 @@ int staLastFailStatus = -1;
 DNSServer dnsServer;
 const IPAddress apIP(192, 168, 4, 1);
 
+// The ESP8266 defaults to modem sleep, which parks the radio between beacons: ~100ms pings and
+// retransmission stalls of 1-2s on the dashboard. Powered from the tractor, so keep it awake.
+void keepRadioAwake() {
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+}
+
 void startAP() {
   WiFi.persistent(false);
   WiFi.disconnect(true);
   bool modeOk = WiFi.mode(WIFI_AP);
+  keepRadioAwake();
   IPAddress gateway = apIP;
   IPAddress subnet(255, 255, 255, 0);
   bool cfgOk = WiFi.softAPConfig(apIP, gateway, subnet);
@@ -76,6 +83,7 @@ void updateWifi(unsigned long currentMillis) {
     if (WiFi.status() == WL_CONNECTED) {
       staAttemptInProgress = false;
       wifiConnectedSta = true;
+      keepRadioAwake();
       Serial.println("STA connected");
     } else if (currentMillis - staAttemptDeadline < (1UL << 31)) { // deadline reached (non-wrapping compare)
       staAttemptInProgress = false;
@@ -105,6 +113,7 @@ void updateWifi(unsigned long currentMillis) {
       return;
     }
     WiFi.mode(WIFI_STA);
+    keepRadioAwake();
     WiFi.begin(sta_ssid, sta_password);
     staAttemptInProgress = true;
     staAttempts++;
