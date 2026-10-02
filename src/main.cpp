@@ -126,7 +126,7 @@ void updateWifi(unsigned long currentMillis) {
 #define ENGINE_PROBE_RISE_VOLTS       0.05  // minimum voltage rise during a pulse to call the engine running
 #define ENGINE_GPS_MIN_SPEED_KMH      3.0   // average speed above this (valid GPS fix) means the engine is on
 #define ENGINE_GPS_AVG_WINDOW_MS      15000 // ...averaged over this window, sampled once per second
-#define ENGINE_RUNNING_GRACE_MS       15000 // after seeing the engine charging, ride out voltage sags this long before probing
+#define ENGINE_RUNNING_GRACE_MS       300000 // after seeing the engine charging, ride out voltage sags this long before probing
 
 // PID Configuration
 #define PID_SAMPLE_TIME       20   // ms
@@ -147,13 +147,13 @@ void start_pid_autotune() {
 }
 
 // Charging-hours + maintenance counter, persisted to flash (throttled: saves every
-// 300s of *accumulated active* runtime, not every loop iteration or wall-clock tick).
-// Worst case on abrupt power loss (no shutdown signal on this tractor): up to 300s of
+// 60s of *accumulated active* runtime, not every loop iteration or wall-clock tick).
+// Worst case on abrupt power loss (no shutdown signal on this tractor): up to 60s of
 // unsaved hours, harmless for a maintenance counter (undercounts slightly, never over).
 // Wear: LittleFS wear-levels across its partition; at this cadence even continuous
 // charging stays far under typical NOR flash erase-cycle budgets over the unit's life.
 LittleFsStore usageStore("/usage.bin");
-UsageCounters usageCounters(usageStore, 250, 300); // default: service every 250h
+UsageCounters usageCounters(usageStore, 250, 60) ; // default: service every 250h
 
 // Maintenance logbook: append-only, written only on real (rare) user-logged service
 // events, so flash wear is a non-issue here regardless of UsageCounters' cadence above.

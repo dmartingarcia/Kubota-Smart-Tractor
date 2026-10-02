@@ -26,13 +26,16 @@ void UsageCounters::begin(unsigned long currentMillis) {
 }
 
 void UsageCounters::tick(bool engineActive, unsigned long currentMillis) {
-  unsigned long elapsedMs = currentMillis - lastTickMillis_;
-  lastTickMillis_ = currentMillis;
+  if (!engineActive) {
+    lastTickMillis_ = currentMillis; // stopped time is never counted, nor carried into the next run
+    return;
+  }
 
-  if (!engineActive || elapsedMs == 0) return;
-
-  uint32_t elapsedSeconds = static_cast<uint32_t>(elapsedMs / 1000);
-  if (elapsedSeconds == 0) return; // accumulate only whole seconds; sub-second remainder is dropped
+  // loop() ticks every few ms, so a tick usually spans well under 1s: only advance the
+  // reference by the whole seconds consumed, leaving the remainder to accumulate.
+  uint32_t elapsedSeconds = static_cast<uint32_t>((currentMillis - lastTickMillis_) / 1000);
+  if (elapsedSeconds == 0) return;
+  lastTickMillis_ += static_cast<unsigned long>(elapsedSeconds) * 1000UL;
 
   data_.totalRunSeconds += elapsedSeconds;
   data_.secondsSinceService += elapsedSeconds;

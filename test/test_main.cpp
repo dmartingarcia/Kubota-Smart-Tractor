@@ -367,6 +367,25 @@ void test_usage_counters_accumulate_only_while_engine_active() {
     TEST_ASSERT_EQUAL_UINT32(15, counters.secondsSinceService());
 }
 
+void test_usage_counters_count_with_fast_loop_ticks() {
+    // Real loop() ticks every few ms, far below 1s: sub-second time must carry over, not be dropped.
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 250, 300);
+    counters.begin(0);
+    for (unsigned long t = 20; t <= 10000; t += 20) counters.tick(true, t);
+    TEST_ASSERT_EQUAL_UINT32(10, counters.totalRunSeconds());
+}
+
+void test_usage_counters_idle_time_not_carried_into_next_run() {
+    InMemoryFlashStore store;
+    UsageCounters counters(store, 250, 300);
+    counters.begin(0);
+    for (unsigned long t = 20; t <= 5000; t += 20) counters.tick(true, t);   // 5s running
+    for (unsigned long t = 5020; t <= 65000; t += 20) counters.tick(false, t); // 60s stopped
+    counters.tick(true, 65500);                                              // engine back on
+    TEST_ASSERT_EQUAL_UINT32(5, counters.totalRunSeconds());                 // idle minute not counted
+}
+
 void test_usage_counters_throttles_writes() {
     InMemoryFlashStore store;
     UsageCounters counters(store, 250, 300); // save every 300s of accumulated runtime
@@ -721,6 +740,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_mirror_duty_clamps_overrange);
     RUN_TEST(test_usage_counters_first_boot_uses_defaults);
     RUN_TEST(test_usage_counters_accumulate_only_while_engine_active);
+    RUN_TEST(test_usage_counters_count_with_fast_loop_ticks);
+    RUN_TEST(test_usage_counters_idle_time_not_carried_into_next_run);
     RUN_TEST(test_usage_counters_throttles_writes);
     RUN_TEST(test_usage_counters_reset_and_reload_across_reboot);
     RUN_TEST(test_usage_counters_maintenance_due);

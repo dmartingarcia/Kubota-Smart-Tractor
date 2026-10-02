@@ -253,7 +253,7 @@ in `/engine_mode.bin`; any combination, empty falls back to GPS + alternator).
 | >= 14.4V | field **off**, overvoltage alert latched 60s; engine on if "always"/"alternator" selected |
 | 13.0V - 14.4V | PID regulates to 14.0V (autotune swings output here); engine on if "always"/"alternator" selected |
 | <= 13.0V, engine forced on (always, or GPS moving) | field at **100%** immediately, no probing |
-| <= 13.0V, alternator source only | probe: 3s full-field pulse; rise >= 0.05V = running, else off for 8s; 15s grace after any sign of charging so sags at high RPM don't stop the drive |
+| <= 13.0V, alternator source only | probe: 3s full-field pulse; rise >= 0.05V = running, else off for 8s; 5 min grace after any sign of charging so sags at high RPM don't stop the drive |
 | <= 13.0V, only GPS selected and standing still | field off, engine off |
 
 The LED mirrors the final duty written to the field pin in every case.
@@ -307,9 +307,9 @@ Use the web dashboard for WiFi/mode status.
 - 🧯 Enclose in IP67-rated waterproof case
 
 ## Persistence design notes 💾
-- **Usage counters** (`UsageCounters`, `/usage.bin`): saved every 300s of *accumulated
+- **Usage counters** (`UsageCounters`, `/usage.bin`): saved every 60s of *accumulated
   active charging time* (not wall-clock, not every loop). Worst case on an abrupt power
-  cut (this tractor has no shutdown signal) is losing the last <300s of hours - harmless
+  cut (this tractor has no shutdown signal) is losing the last <60s of hours - harmless
   for a maintenance counter, since it only ever undercounts. At this cadence, even
   continuous charging stays far under typical NOR flash erase-cycle budgets over the
   unit's lifetime; LittleFS also wear-levels across its partition rather than hammering
