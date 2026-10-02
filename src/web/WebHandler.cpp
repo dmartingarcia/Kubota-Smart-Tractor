@@ -473,7 +473,7 @@ void handleRoot() {
 }
 
 void handleData() {
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(1280); // ~35 fields at 16B each + copied Strings; 512 silently dropped the tail
   doc["voltage"] = history[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE].voltage;
   doc["outputMode"] = alternator.isPWMEnabled() ? "pwm" : "relay";
   doc["pwmPercentage"] = alternator.getPWMPercent();
@@ -525,23 +525,32 @@ void handleData() {
 }
 
 void handleHistory() {
-  DynamicJsonDocument doc(4096);
-  JsonArray array = doc.to<JsonArray>();
+  // Streamed in chunks: a JsonDocument holding all HISTORY_SIZE points needs ~10KB of
+  // heap (and a 4KB one silently kept only the oldest ~50), so build it piecewise instead.
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
 
+  char chunk[512];
+  size_t len = 0;
+  chunk[len++] = '[';
+  bool first = true;
   for(int i = 0; i < HISTORY_SIZE; i++) {
     int idx = (historyIndex + i) % HISTORY_SIZE;
     if(history[idx].timestamp == 0) continue;
 
-    JsonObject point = array.createNestedObject();
-    point["timestamp"] = history[idx].timestamp;
-    point["voltage"] = history[idx].voltage;
-    point["mode"] = history[idx].outputMode ? "pwm" : "relay";
-    point["pwm"] = history[idx].pwmValue;
+    if(len > sizeof(chunk) - 80) {
+      chunk[len] = '\0';
+      server.sendContent(chunk);
+      len = 0;
+    }
+    len += snprintf(chunk + len, sizeof(chunk) - len, "%s{\"timestamp\":%lu,\"voltage\":%.2f,\"pwm\":%u}",
+                    first ? "" : ",", history[idx].timestamp, history[idx].voltage, history[idx].pwmValue);
+    first = false;
   }
-
-  String json;
-  serializeJson(doc, json);
-  server.send(200, "application/json", json);
+  chunk[len++] = ']';
+  chunk[len] = '\0';
+  server.sendContent(chunk);
+  server.sendContent("");
 }
 
 void handleAutotuneStart() {

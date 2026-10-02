@@ -5,6 +5,7 @@
 #include "../src/charging/PidAutotuner.h"
 #include "../src/charging/EngineDetector.h"
 #include "../src/charging/PwmMirror.h"
+#include "../src/charging/RealTimePid.h"
 #include "../src/charging/EngineMode.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
@@ -691,8 +692,21 @@ void test_speed_average_survives_ring_overflow() {
     TEST_ASSERT_DOUBLE_WITHIN(0.001, 10.0, avg.average(1000));
 }
 
+void test_pid_reset_discards_windup() {
+    RealTimePid pid(30, 3, 1, 0, 1023);
+    pid.compute(140, 120, 0);
+    for (unsigned long t = 20; t <= 60000; t += 20) pid.compute(140, 120, t); // 60s deep below setpoint
+    TEST_ASSERT_EQUAL_DOUBLE(1023, pid.compute(140, 120, 60020));            // saturated
+
+    pid.reset();                                                             // left the regulation band
+    TEST_ASSERT_EQUAL_DOUBLE(0, pid.compute(140, 130, 70000));               // first call after reset
+    double out = pid.compute(140, 130, 70020);
+    TEST_ASSERT_TRUE(out < 400);                                             // P-term only, no wound-up integral
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_pid_reset_discards_windup);
     RUN_TEST(test_speed_average_over_window);
     RUN_TEST(test_speed_average_drops_samples_older_than_window);
     RUN_TEST(test_speed_average_throttles_samples);

@@ -265,15 +265,20 @@ void manage_alternator() {
     if(should_run_cycle(millis(), lastPidUpdate, PID_SAMPLE_TIME)) {
       pidInput = current_voltage * 10;
       lastPidUpdate = millis();
-      if(!autotuneActive) pidOutput = chargePID.compute(Setpoint, pidInput, millis());
-
       EngineSourceDecision src = decide_engine_sources(
           engineModeSettings.sources(),
           gps_indicates_engine_running(gpsReader.hasFix(), gpsReader.fixAgeMs(),
                                        gpsSpeedAvg.average(millis()), ENGINE_GPS_MIN_SPEED_KMH));
       bool engineEvidence = src.forceRunning || src.useAlternator; // may charging voltage prove the engine?
 
-      switch(decide_pwm_safety_action(current_voltage, VOLTAGE_THRESHOLD_HIGH, VOLTAGE_THRESHOLD_LOW)) {
+      ChargeAction action = decide_pwm_safety_action(current_voltage, VOLTAGE_THRESHOLD_HIGH, VOLTAGE_THRESHOLD_LOW);
+
+      // The PID only runs inside the regulation band. Outside it (cutoff / full-charge) its
+      // integral would wind up to the clamp, then overshoot past 14.4V on re-entry and unwind
+      // for tens of seconds, bouncing off the cutoff. So reset it whenever it is not in control.
+      if(action != ChargeAction::RUN_PID) chargePID.reset();
+
+      switch(action) {
         case ChargeAction::OFF:
           alternator.off();
           lastTargetPWM = 0;
@@ -331,6 +336,7 @@ void manage_alternator() {
               autotuneActive = false;
             }
           } else {
+            pidOutput = chargePID.compute(Setpoint, pidInput, millis());
             int targetPWM = static_cast<int>(pidOutput);
             alternator.pwm(targetPWM);
             lastTargetPWM = targetPWM;
@@ -402,6 +408,7 @@ void loop() {
   }
 
   if(gpsReader.hasFix()) gpsSpeedAvg.add(gpsReader.speedKmh(), currentMillis);
+  else gpsHasAcceptedFix = false; // fix lost: stop showing a stale position/speed
 
   ArduinoOTA.handle();
   server.handleClient();
