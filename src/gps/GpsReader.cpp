@@ -1,4 +1,5 @@
 #include "GpsReader.h"
+#include "GpsTrack.h"
 
 namespace {
 constexpr uint32_t kMaxFixAgeMs = 5000; // older than this, treat the fix as stale/unsafe to use
@@ -32,3 +33,9 @@ double GpsReader::latitude() { return gps_.location.lat(); }
 double GpsReader::longitude() { return gps_.location.lng(); }
 double GpsReader::speedKmh() { return gps_.speed.kmph(); }
 uint32_t GpsReader::fixAgeMs() { return gps_.location.age(); }
+
+uint32_t GpsReader::epochUtc() {
+  if (!gps_.date.isValid() || !gps_.time.isValid() || gps_.date.year() < 2023) return 0;
+  return utc_to_epoch(gps_.date.year(), gps_.date.month(), gps_.date.day(),
+                      gps_.time.hour(), gps_.time.minute(), gps_.time.second());
+}

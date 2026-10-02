@@ -135,11 +135,19 @@
         <div class="note">Home Assistant/MQTT only reachable while on home WiFi (STA); AP fallback is offline-only.</div>
       </div>
 
-      <div class="card" id="gpsCard" style="display:none;">
+      <div class="card" id="gpsCard" style="grid-column: 1 / -1;">
         <h2>GPS</h2>
+        <div class="row"><span class="label">Status</span><span class="pill pill-bad" id="gpsStatus">--</span></div>
         <div class="row"><span class="label">Position</span><span class="value" id="gpsPosition">--</span></div>
         <div class="row"><span class="label">Speed</span><span class="value" id="gpsSpeed">--</span></div>
         <div class="row"><span class="label">Avg speed (15 s)</span><span class="value" id="gpsSpeedAvg">--</span></div>
+        <div class="row"><span class="label">Session track</span><span class="value" id="trackInfo">--</span></div>
+        <canvas id="trackMap" style="width:100%; height:220px; display:block; border-radius:8px; background:var(--bg);"></canvas>
+        <div class="row" style="margin-top:8px;">
+          <a href="/track.gpx" download="tractor-track.gpx"><button type="button">Download GPX</button></a>
+          <button class="secondary" onclick="clearTrack()">Clear track</button>
+        </div>
+        <div class="note">Recorded while moving (a point every 10 m or more, kept in RAM: it is lost when the board restarts, so download it before switching the engine off). North is up; no map tiles, so it works offline.</div>
       </div>
 
       <div class="card">
@@ -256,14 +264,69 @@
         await fetch('/restart');
       }
 
+      // GPS card is always visible: grey "no module" / "searching" states instead of hiding it.
+      let trackPoints = [], trackFetchedAt = 0, lastGps = null;
       function updateGps(data) {
-        document.getElementById('gpsCard').style.display = data.gpsHasFix ? 'block' : 'none';
-        if (data.gpsHasFix) {
-          setText('gpsPosition', data.gpsLat.toFixed(5) + ', ' + data.gpsLon.toFixed(5));
-          setText('gpsSpeed', data.gpsSpeedKmh.toFixed(1) + ' km/h');
-          setText('gpsSpeedAvg', data.gpsSpeedAvgKmh.toFixed(1) + ' km/h');
-        }
+        lastGps = data.gpsHasFix ? [Math.round(data.gpsLat * 1e6), Math.round(data.gpsLon * 1e6)] : null;
+        setPill('gpsStatus', data.gpsHasFix ? { text: 'FIX', cls: 'pill-good' }
+          : data.gpsConnected ? { text: 'SEARCHING SATELLITES', cls: 'pill-warn' } : { text: 'NO GPS MODULE', cls: 'pill-bad' });
+        setText('gpsPosition', data.gpsHasFix ? data.gpsLat.toFixed(5) + ', ' + data.gpsLon.toFixed(5) : '--');
+        setText('gpsSpeed', data.gpsHasFix ? data.gpsSpeedKmh.toFixed(1) + ' km/h' : '--');
+        setText('gpsSpeedAvg', data.gpsHasFix ? data.gpsSpeedAvgKmh.toFixed(1) + ' km/h' : '--');
         setText('engineGpsAvg', data.gpsHasFix ? data.gpsSpeedAvgKmh.toFixed(1) + ' km/h' : 'no fix');
+        setText('trackInfo', data.trackPoints
+          ? data.trackPoints + ' points, ' + (data.trackDistanceM >= 1000 ? (data.trackDistanceM / 1000).toFixed(2) + ' km' : Math.round(data.trackDistanceM) + ' m')
+          : 'empty');
+        refreshTrack(data);
+      }
+      async function refreshTrack(data) {
+        // The track body is the heavy part: fetch it every 15 s and only if there is something to draw.
+        if (data.trackPoints > 1 && Date.now() - trackFetchedAt > 15000) {
+          trackFetchedAt = Date.now();
+          try { trackPoints = (await (await fetch('/track')).json()).points; } catch (e) { console.error('Track fetch failed:', e); }
+        } else if (!data.trackPoints) {
+          trackPoints = [];
+        }
+        drawTrack();
+      }
+      async function clearTrack() {
+        if (!confirm('Clear the recorded session track?')) return;
+        await fetch('/track/clear');
+        trackPoints = []; trackFetchedAt = 0;
+        fetchData();
+      }
+      function drawTrack() {
+        const canvas = document.getElementById('trackMap');
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth || 300, h = 220;
+        canvas.width = w * dpr; canvas.height = h * dpr;
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        const pts = lastGps && trackPoints.length ? trackPoints.concat([lastGps]) : trackPoints.slice();
+        ctx.fillStyle = cssVar('--label'); ctx.font = '12px sans-serif';
+        if (!pts.length) {
+          ctx.textAlign = 'center';
+          ctx.fillText(lastGps ? 'Position fixed - the track starts when the tractor moves' : 'No track yet', w / 2, h / 2);
+          return;
+        }
+        let la0 = Infinity, la1 = -Infinity, lo0 = Infinity, lo1 = -Infinity;
+        pts.forEach(p => { la0 = Math.min(la0, p[0]); la1 = Math.max(la1, p[0]); lo0 = Math.min(lo0, p[1]); lo1 = Math.max(lo1, p[1]); });
+        const midLat = (la0 + la1) / 2e6, kx = Math.cos(midLat * Math.PI / 180);
+        const spanX = Math.max((lo1 - lo0) * kx, 500), spanY = Math.max(la1 - la0, 500); // >= ~55 m so a single point isn't zoomed to infinity
+        const pad = 16, scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanY);
+        const cx = (lo0 + lo1) / 2, cy = (la0 + la1) / 2;
+        const X = p => w / 2 + (p[1] - cx) * kx * scale, Y = p => h / 2 - (p[0] - cy) * scale;
+        ctx.strokeStyle = cssVar('--accent'); ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
+        trackPoints.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p), Y(p)); else ctx.lineTo(X(p), Y(p)); });
+        ctx.stroke();
+        const dot = (p, color) => { ctx.beginPath(); ctx.arc(X(p), Y(p), 5, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill(); };
+        if (trackPoints.length) dot(trackPoints[0], cssVar('--good'));
+        if (lastGps) dot(lastGps, cssVar('--warn'));
+        ctx.fillStyle = cssVar('--label'); ctx.textAlign = 'left';
+        ctx.fillText('N \u2191', 8, 16);
+        const widthM = Math.round(spanX / 1e6 * 111195);
+        ctx.textAlign = 'right'; ctx.fillText('\u2248 ' + widthM + ' m wide', w - 8, 16);
       }
 
       let calFrozen = false;

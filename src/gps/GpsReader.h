@@ -27,6 +27,7 @@ class GpsReader {
     double longitude();
     double speedKmh();
     uint32_t fixAgeMs(); // milliseconds since the last valid location update
+    uint32_t epochUtc();  // UTC seconds from the GPS date/time, 0 if not valid yet (no NTP/WiFi needed)
 
   private:
     SoftwareSerial serial_;

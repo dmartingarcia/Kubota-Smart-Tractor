@@ -26,6 +26,7 @@
 #include "gps/GpsReader.h"
 #include "gps/GpsJumpFilter.h"
 #include "gps/SpeedAverager.h"
+#include "gps/GpsTrack.h"
 
 // Extern WiFi credentials from secrets.h
 extern const char* ap_ssid;
@@ -224,6 +225,13 @@ GpsReader gpsReader(GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 // speed cap; resyncs after 3 consecutive rejects rather than getting stuck on a bad seed).
 GpsJumpFilter gpsJumpFilter(60.0, 3);
 SpeedAverager gpsSpeedAvg(ENGINE_GPS_AVG_WINDOW_MS, 1000);
+
+// Where the tractor has been this session (RAM only: the board restarts with the ignition).
+// A point is recorded every >= 10 m while moving; viewable on the dashboard, downloadable as GPX.
+#define TRACK_MIN_DISTANCE_M   10.0
+#define TRACK_MIN_SPEED_KMH    1.5   // below this it's parked jitter, not driving
+GpsTrack gpsTrack(TRACK_MIN_DISTANCE_M);
+unsigned long lastTrackSample = 0;
 
 // User one-point voltage calibration (typed in from a multimeter on the dashboard), applied on
 // top of the fixed divider calibration. unscaledVoltage is the reading BEFORE that scale, which
@@ -478,6 +486,18 @@ void store_data() {
   Serial.println();
 }
 
+// One pass of the control loop (voltage read + alternator decision). loop() runs it as part of
+// its normal flow; long blocking web responses (the GPX download) call it between chunks so the
+// alternator keeps being regulated while the browser is being fed.
+void control_tick() {
+  unsigned long now = millis();
+  if(should_run_cycle(now, lastVoltageRead, PID_SAMPLE_TIME)) {
+    current_voltage = read_voltage();
+    lastVoltageRead = now;
+  }
+  manage_alternator();
+}
+
 unsigned long lastDataStore = 0;
 
 void loop() {
@@ -539,6 +559,10 @@ void loop() {
 
   if(gpsReader.hasFix()) gpsSpeedAvg.add(gpsReader.speedKmh(), currentMillis);
   else gpsHasAcceptedFix = false; // fix lost: stop showing a stale position/speed
+  if(gpsHasAcceptedFix && gpsReader.speedKmh() >= TRACK_MIN_SPEED_KMH && currentMillis - lastTrackSample >= 1000) {
+    lastTrackSample = currentMillis;
+    gpsTrack.add(gpsJumpFilter.lastLat(), gpsJumpFilter.lastLon(), gpsReader.epochUtc());
+  }
 
   ArduinoOTA.handle();
   sectionUs = micros();

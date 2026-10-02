@@ -14,6 +14,7 @@
 #include "../src/storage/MaintenanceLog.h"
 #include "../src/gps/GpsJumpFilter.h"
 #include "../src/gps/SpeedAverager.h"
+#include "../src/gps/GpsTrack.h"
 #include <string.h>
 #include <string>
 #include <vector>
@@ -1027,8 +1028,101 @@ void test_pid_settings_corrupt_blob_falls_back_to_factory() {
     TEST_ASSERT_EQUAL_DOUBLE(30, b.gains().kp);
 }
 
+void test_track_records_first_point_and_ignores_jitter() {
+    GpsTrack t(10.0);
+    TEST_ASSERT_TRUE(t.add(41.0, 2.0, 0));
+    TEST_ASSERT_FALSE(t.add(41.00005, 2.0, 0));      // ~5.5m: parked jitter
+    TEST_ASSERT_TRUE(t.add(41.0002, 2.0, 0));        // ~22m
+    TEST_ASSERT_EQUAL(2, static_cast<int>(t.size()));
+}
+
+void test_track_accumulates_distance() {
+    GpsTrack t(10.0);
+    t.add(41.000, 2.0, 0);
+    t.add(41.001, 2.0, 0);
+    t.add(41.002, 2.0, 0);
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, 222.39, t.distanceMeters());   // 2 x 0.001deg of latitude
+    TEST_ASSERT_EQUAL_INT32(41000000, t.at(0).latE6);
+    TEST_ASSERT_EQUAL_INT32(41002000, t.at(2).latE6);
+}
+
+void test_track_longitude_distance_shrinks_with_latitude() {
+    GpsTrack equator(1.0), north(1.0);
+    equator.add(0.0, 0.0, 0);   equator.add(0.0, 0.001, 0);
+    north.add(60.0, 0.0, 0);    north.add(60.0, 0.001, 0);
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, 111.19, equator.distanceMeters());
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, 55.6, north.distanceMeters());  // cos(60) = 0.5
+}
+
+void test_track_halves_and_doubles_spacing_when_full() {
+    GpsTrack t(10.0);
+    for (size_t i = 0; i < GpsTrack::kCapacity; i++) t.add(41.0 + i * 0.0002, 2.0, 0);   // ~22m apart
+    TEST_ASSERT_EQUAL(static_cast<int>(GpsTrack::kCapacity), static_cast<int>(t.size()));
+    TEST_ASSERT_TRUE(t.add(41.0 + GpsTrack::kCapacity * 0.0002, 2.0, 0));                // one more -> compaction
+    TEST_ASSERT_EQUAL(static_cast<int>(GpsTrack::kCapacity / 2 + 1), static_cast<int>(t.size()));
+    TEST_ASSERT_EQUAL_DOUBLE(20.0, t.minDistanceMeters());
+    TEST_ASSERT_EQUAL_INT32(41000000, t.at(0).latE6);                                    // session start kept
+    TEST_ASSERT_DOUBLE_WITHIN(5.0, 500 * 22.24, t.distanceMeters());                     // true length survives
+    TEST_ASSERT_FALSE(t.add(41.0 + GpsTrack::kCapacity * 0.0002 + 0.00015, 2.0, 0));     // 16m < 20m now
+}
+
+void test_track_clear_resets_everything() {
+    GpsTrack t(10.0);
+    t.add(41.0, 2.0, 0);
+    t.add(41.001, 2.0, 0);
+    t.clear();
+    TEST_ASSERT_EQUAL(0, static_cast<int>(t.size()));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, t.distanceMeters());
+    TEST_ASSERT_TRUE(t.add(41.0, 2.0, 0));                                               // first point again
+}
+
+void test_utc_to_epoch() {
+    TEST_ASSERT_EQUAL_UINT32(1790944496UL, utc_to_epoch(2026, 10, 2, 12, 34, 56));
+    TEST_ASSERT_EQUAL_UINT32(0UL, utc_to_epoch(1970, 1, 1, 0, 0, 0));
+    TEST_ASSERT_EQUAL_UINT32(1709251199UL, utc_to_epoch(2024, 2, 29, 23, 59, 59));      // leap day
+    TEST_ASSERT_EQUAL_UINT32(951868800UL, utc_to_epoch(2000, 3, 1, 0, 0, 0));
+}
+
+void test_epoch_to_iso8601_roundtrip() {
+    char buf[32];
+    epoch_to_iso8601(1790944496UL, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("2026-10-02T12:34:56Z", buf);
+    epoch_to_iso8601(1709251199UL, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("2024-02-29T23:59:59Z", buf);
+}
+
+void test_gpx_point_with_and_without_time() {
+    char buf[160];
+    size_t n = gpx_format_point(buf, sizeof(buf), TrackPoint{41123456, -2654321, 1790944496UL});
+    TEST_ASSERT_EQUAL_STRING("<trkpt lat=\"41.123456\" lon=\"-2.654321\"><time>2026-10-02T12:34:56Z</time></trkpt>\n", buf);
+    TEST_ASSERT_EQUAL(static_cast<int>(strlen(buf)), static_cast<int>(n));
+    gpx_format_point(buf, sizeof(buf), TrackPoint{-500000, 7, 0});
+    TEST_ASSERT_EQUAL_STRING("<trkpt lat=\"-0.500000\" lon=\"0.000007\"></trkpt>\n", buf);
+}
+
+void test_gpx_point_reports_when_it_does_not_fit() {
+    char tiny[20];
+    TEST_ASSERT_EQUAL(0, static_cast<int>(gpx_format_point(tiny, sizeof(tiny), TrackPoint{1, 2, 3})));
+}
+
+void test_gpx_document_is_well_formed_xml_wrapper() {
+    TEST_ASSERT_NOT_NULL(strstr(kGpxHeader, "<gpx"));
+    TEST_ASSERT_NOT_NULL(strstr(kGpxHeader, "<trkseg>"));
+    TEST_ASSERT_EQUAL_STRING("</trkseg></trk></gpx>\n", kGpxFooter);
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_track_records_first_point_and_ignores_jitter);
+    RUN_TEST(test_track_accumulates_distance);
+    RUN_TEST(test_track_longitude_distance_shrinks_with_latitude);
+    RUN_TEST(test_track_halves_and_doubles_spacing_when_full);
+    RUN_TEST(test_track_clear_resets_everything);
+    RUN_TEST(test_utc_to_epoch);
+    RUN_TEST(test_epoch_to_iso8601_roundtrip);
+    RUN_TEST(test_gpx_point_with_and_without_time);
+    RUN_TEST(test_gpx_point_reports_when_it_does_not_fit);
+    RUN_TEST(test_gpx_document_is_well_formed_xml_wrapper);
     RUN_TEST(test_pid_settings_factory_when_nothing_saved);
     RUN_TEST(test_pid_settings_custom_survives_reboot);
     RUN_TEST(test_pid_settings_rejects_invalid_gains);
