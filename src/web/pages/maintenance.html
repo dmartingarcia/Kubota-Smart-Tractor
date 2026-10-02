@@ -1,0 +1,79 @@
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Maintenance Logbook</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      * { box-sizing: border-box; min-width: 0; }
+      html, body { max-width: 100%; overflow-x: hidden; }
+      body { font-family: -apple-system, Arial, sans-serif; margin: 0; padding: 16px; background: #f8f9fa; color: #2c3e50; }
+      h1 { font-size: 1.4em; }
+      a { color: #007bff; text-decoration: none; }
+      .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e9ecef; font-size: 0.9em; }
+      th { color: #6c757d; font-weight: 600; }
+      input[type=text] { width: 100%; padding: 8px; border: 1px solid #e9ecef; border-radius: 6px; margin-bottom: 8px; }
+      button { background: #007bff; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+      .empty { color: #6c757d; font-size: 0.9em; }
+    </style>
+  </head>
+  <body>
+    <a href="/">&larr; Back to dashboard</a>
+    <h1>Maintenance Logbook</h1>
+
+    <div class="card">
+      <h2 style="font-size:1em;margin-top:0;">Log a maintenance event</h2>
+      <input type="text" id="note" placeholder="e.g. Oil change, filter replaced" maxlength="39">
+      <button onclick="addEntry()">Add entry</button>
+    </div>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>Date</th><th>Hours</th><th>Note</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none;">No maintenance logged yet.</div>
+    </div>
+
+    <script>
+      const Fmt = {
+        date: epoch => epoch ? new Date(epoch * 1000).toLocaleDateString() : 'unknown date',
+        hours: h => h + 'h',
+      };
+
+      // One log entry -> one <tr>. textContent for the note: safe against injected markup.
+      function renderLogRow(entry) {
+        const tr = document.createElement('tr');
+        const dateCell = document.createElement('td');
+        const hoursCell = document.createElement('td');
+        const noteCell = document.createElement('td');
+        dateCell.textContent = Fmt.date(entry.epoch);
+        hoursCell.textContent = Fmt.hours(entry.hours);
+        noteCell.textContent = entry.note;
+        tr.append(dateCell, hoursCell, noteCell);
+        return tr;
+      }
+
+      async function loadEntries() {
+        const res = await fetch('/maintenance/log');
+        const entries = await res.json();
+        const rows = document.getElementById('rows');
+        rows.innerHTML = '';
+        document.getElementById('empty').style.display = entries.length ? 'none' : 'block';
+        entries.slice().reverse().forEach(e => rows.appendChild(renderLogRow(e)));
+      }
+
+      async function addEntry() {
+        const note = document.getElementById('note').value.trim();
+        if (!note) return;
+        await fetch('/maintenance/log/add?note=' + encodeURIComponent(note));
+        document.getElementById('note').value = '';
+        loadEntries();
+      }
+
+      loadEntries();
+    </script>
+  </body>
+  </html>
+  

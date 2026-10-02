@@ -169,6 +169,10 @@ If `sta_ssid` is set and reachable, the dashboard is available on your home netw
 IP. Otherwise (or always, as a fallback), connect to the AP WiFi network and browse to
 `http://192.168.4.1`. The dashboard has no external dependencies (chart is drawn with
 plain `<canvas>`, no CDN) so it renders correctly even fully offline in AP mode.
+The pages live in `src/web/pages/*.html`; `scripts/embed_html.py` gzips them at build time into
+flash (the ESP8266 sends synchronously over a slow link, so the raw 23KB dashboard stalled the
+loop and could arrive truncated; gzipped it is ~7KB). The browser revalidates it with an ETag
+and gets an empty 304 after the first load.
 
 **Dashboard (`/`):**
 - Large colour-coded battery voltage, light/dark theme (follows the device), lost-connection
