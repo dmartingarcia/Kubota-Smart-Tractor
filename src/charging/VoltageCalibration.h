@@ -21,6 +21,9 @@ class VoltageCalibration {
     void begin();
     float scale() const { return scale_; }
     bool calibrate(float measuredVolts, float unscaledVolts); // false = rejected, nothing changed
+    // Same, but from the value the dashboard SHOWED (already scaled): the voltage moves, so the
+    // user reports what the UI read at the moment they read the multimeter.
+    bool calibrateFromShown(float measuredVolts, float shownVolts);
     void reset();                                              // back to 1.0
 
   private:

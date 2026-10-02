@@ -8,6 +8,7 @@
 #include "../src/charging/RealTimePid.h"
 #include "../src/charging/EngineMode.h"
 #include "../src/charging/VoltageCalibration.h"
+#include "../src/charging/PidSettings.h"
 #include "../src/storage/UsageCounters.h"
 #include "../src/connectivity/MqttPublisher.h"
 #include "../src/storage/MaintenanceLog.h"
@@ -939,8 +940,103 @@ void test_pid_exposes_current_tunings() {
     TEST_ASSERT_EQUAL_DOUBLE(2.0, pid.kd());
 }
 
+void test_deadline_pending_until_reached() {
+    TEST_ASSERT_TRUE(is_before_deadline(1000, 5000));
+    TEST_ASSERT_FALSE(is_before_deadline(5000, 5000));   // reached
+    TEST_ASSERT_FALSE(is_before_deadline(6000, 5000));   // passed
+}
+
+void test_deadline_handles_millis_rollover() {
+    unsigned long deadline = 10;                         // wrapped past ULONG_MAX
+    TEST_ASSERT_TRUE(is_before_deadline(static_cast<unsigned long>(-5), deadline));
+    TEST_ASSERT_FALSE(is_before_deadline(20, deadline));
+}
+
+void test_calibrate_from_shown_uses_what_the_ui_displayed() {
+    InMemoryFlashStore store;
+    VoltageCalibration c(store);
+    c.begin();
+    TEST_ASSERT_TRUE(c.calibrateFromShown(13.8f, 14.0f));            // UI said 14.00 (scale 1.0), meter 13.8
+    TEST_ASSERT_FLOAT_WITHIN(0.0001, 0.98571f, c.scale());
+    // Now the UI (already scaled) shows 13.9 while the meter says 13.8: the correction is relative to what was SHOWN.
+    TEST_ASSERT_TRUE(c.calibrateFromShown(13.8f, 13.9f));
+    TEST_ASSERT_FLOAT_WITHIN(0.0001, 0.98571f * 13.8f / 13.9f, c.scale());
+}
+
+void test_pid_settings_factory_when_nothing_saved() {
+    InMemoryFlashStore store;
+    PidSettings ps(store, PidGains{30, 3, 1});
+    ps.begin();
+    TEST_ASSERT_FALSE(ps.hasCustom());
+    TEST_ASSERT_EQUAL_DOUBLE(30, ps.gains().kp);
+    TEST_ASSERT_EQUAL_DOUBLE(3, ps.gains().ki);
+    TEST_ASSERT_EQUAL_DOUBLE(1, ps.gains().kd);
+    TEST_ASSERT_EQUAL_INT(0, store.writeCalls);
+}
+
+void test_pid_settings_custom_survives_reboot() {
+    InMemoryFlashStore store;
+    PidSettings a(store, PidGains{30, 3, 1});
+    a.begin();
+    TEST_ASSERT_TRUE(a.save(PidGains{12.5, 0.75, 2.25}));            // e.g. autotune result
+    PidSettings b(store, PidGains{30, 3, 1});                        // "reboot"
+    b.begin();
+    TEST_ASSERT_TRUE(b.hasCustom());
+    TEST_ASSERT_EQUAL_DOUBLE(12.5, b.gains().kp);
+    TEST_ASSERT_EQUAL_DOUBLE(0.75, b.gains().ki);
+    TEST_ASSERT_EQUAL_DOUBLE(2.25, b.gains().kd);
+}
+
+void test_pid_settings_rejects_invalid_gains() {
+    InMemoryFlashStore store;
+    PidSettings ps(store, PidGains{30, 3, 1});
+    ps.begin();
+    double nan = 0.0 / 0.0;
+    TEST_ASSERT_FALSE(ps.save(PidGains{nan, 1, 1}));
+    TEST_ASSERT_FALSE(ps.save(PidGains{-1, 1, 1}));
+    TEST_ASSERT_FALSE(ps.save(PidGains{0, 1, 1}));                   // kp must be > 0
+    TEST_ASSERT_FALSE(ps.save(PidGains{1e9, 1, 1}));
+    TEST_ASSERT_FALSE(ps.hasCustom());
+    TEST_ASSERT_EQUAL_DOUBLE(30, ps.gains().kp);
+    TEST_ASSERT_EQUAL_INT(0, store.writeCalls);
+}
+
+void test_pid_settings_reset_returns_to_factory_and_persists() {
+    InMemoryFlashStore store;
+    PidSettings a(store, PidGains{30, 3, 1});
+    a.begin();
+    a.save(PidGains{12.5, 0.75, 2.25});
+    a.resetToFactory();
+    TEST_ASSERT_FALSE(a.hasCustom());
+    TEST_ASSERT_EQUAL_DOUBLE(30, a.gains().kp);
+    PidSettings b(store, PidGains{30, 3, 1});
+    b.begin();
+    TEST_ASSERT_FALSE(b.hasCustom());                                // stays factory after reboot
+    TEST_ASSERT_EQUAL_DOUBLE(30, b.gains().kp);
+}
+
+void test_pid_settings_corrupt_blob_falls_back_to_factory() {
+    InMemoryFlashStore store;
+    PidSettings a(store, PidGains{30, 3, 1});
+    a.begin();
+    a.save(PidGains{12.5, 0.75, 2.25});
+    store.buffer[4] = 0xFF; store.buffer[5] = 0xFF; store.buffer[6] = 0xFF; store.buffer[7] = 0x7F; // kp -> NaN/garbage
+    PidSettings b(store, PidGains{30, 3, 1});
+    b.begin();
+    TEST_ASSERT_FALSE(b.hasCustom());
+    TEST_ASSERT_EQUAL_DOUBLE(30, b.gains().kp);
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_pid_settings_factory_when_nothing_saved);
+    RUN_TEST(test_pid_settings_custom_survives_reboot);
+    RUN_TEST(test_pid_settings_rejects_invalid_gains);
+    RUN_TEST(test_pid_settings_reset_returns_to_factory_and_persists);
+    RUN_TEST(test_pid_settings_corrupt_blob_falls_back_to_factory);
+    RUN_TEST(test_deadline_pending_until_reached);
+    RUN_TEST(test_deadline_handles_millis_rollover);
+    RUN_TEST(test_calibrate_from_shown_uses_what_the_ui_displayed);
     RUN_TEST(test_pid_exposes_current_tunings);
     RUN_TEST(test_voltage_scale_from_multimeter_reading);
     RUN_TEST(test_voltage_scale_rejects_implausible_input);

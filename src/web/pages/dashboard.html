@@ -95,13 +95,18 @@
 
       <div class="card">
         <h2>Voltage calibration</h2>
-        <div class="row"><span class="label">Device reads</span><span class="value" id="calReading">--</span></div>
         <div class="row"><span class="label">Scale factor</span><span class="value" id="calScale">--</span></div>
-        <div class="row"><span class="label">Multimeter reads</span>
-          <span><input type="number" id="calInput" step="0.01" min="6" max="20" placeholder="13.80"> V <button onclick="calibrateVoltage()">Calibrate</button></span>
+        <div class="row"><span class="label">Dashboard reads</span>
+          <span><input type="number" id="calShown" step="0.01" min="6" max="20" oninput="calFreeze()"> V</span>
         </div>
+        <div class="row"><span class="label">Multimeter reads</span>
+          <span><input type="number" id="calInput" step="0.01" min="6" max="20" placeholder="13.80" onfocus="calFreeze()"> V</span>
+        </div>
+        <div class="row"><button onclick="calibrateVoltage()">Calibrate</button><button class="secondary" onclick="calRefresh()">Refresh reading</button></div>
+        <div class="row"><button class="secondary" onclick="pauseAlternator(20)">Pause alternator 20 s</button><button class="secondary" onclick="pauseAlternator(0)">Resume</button></div>
+        <div class="row"><span class="label">Alternator</span><span class="pill pill-good" id="calPause">running</span></div>
         <button class="secondary" onclick="resetCalibration()">Reset to factory</button>
-        <div class="note" id="calMsg">Measure at the battery terminals with the voltage stable, type the multimeter reading and press Calibrate. Asks for user <b>admin</b> and the AP password.</div>
+        <div class="note" id="calMsg">The voltage moves, so the "Dashboard reads" box freezes as soon as you click the multimeter box: type what the dashboard showed at that moment and what the multimeter said. Or pause the alternator to let the voltage settle first (it resumes by itself). Asks for user <b>admin</b> and the AP password.</div>
       </div>
 
       <div class="card">
@@ -149,6 +154,7 @@
         <div class="row"><span class="label">Status</span><span class="pill" id="autotuneStatus">idle</span></div>
         <div class="row"><span class="label">Kp / Ki / Kd</span><span class="value" id="pidGains">--</span></div>
         <button id="autotuneBtn" onclick="startAutotune()">Start autotune</button>
+        <button class="secondary" onclick="resetPid()">Reset PID to factory</button>
         <div class="note">Briefly swings charge output to measure the alternator's response and tune the PID automatically.</div>
       </div>
 
@@ -260,16 +266,26 @@
         setText('engineGpsAvg', data.gpsHasFix ? data.gpsSpeedAvgKmh.toFixed(1) + ' km/h' : 'no fix');
       }
 
+      let calFrozen = false;
+      function calFreeze() { calFrozen = true; }
+      function calRefresh() { calFrozen = false; fetchData(); }
       function updateCalibration(data) {
-        setText('calReading', Fmt.volts(data.voltage));
         setText('calScale', data.voltageScale.toFixed(4) + (data.voltageScale === 1 ? ' (factory)' : ''));
+        if (!calFrozen) document.getElementById('calShown').value = data.voltage.toFixed(2);
+        setPill('calPause', data.alternatorPausedS > 0
+          ? { text: 'PAUSED ' + data.alternatorPausedS + ' s', cls: 'pill-warn' } : { text: 'running', cls: 'pill-good' });
       }
       async function calibrateVoltage() {
         const volts = document.getElementById('calInput').value;
-        const res = await fetch('/voltage/calibrate?volts=' + encodeURIComponent(volts));
+        const shown = document.getElementById('calShown').value;
+        const res = await fetch('/voltage/calibrate?volts=' + encodeURIComponent(volts) + '&shown=' + encodeURIComponent(shown));
         const body = await res.json().catch(() => ({}));
         setText('calMsg', res.ok ? 'Calibrated. New scale ' + body.scale : (body.error || 'Calibration failed'));
-        if (res.ok) document.getElementById('calInput').value = '';
+        if (res.ok) { document.getElementById('calInput').value = ''; calFrozen = false; }
+        fetchData();
+      }
+      async function pauseAlternator(seconds) {
+        await fetch('/alternator/pause?seconds=' + seconds);
         fetchData();
       }
       async function resetCalibration() {
@@ -277,9 +293,14 @@
         setText('calMsg', 'Back to the factory calibration.');
         fetchData();
       }
+      async function resetPid() {
+        if (!confirm('Forget the saved PID gains and go back to the factory ones?')) return;
+        await fetch('/pid/reset');
+        fetchData();
+      }
 
       function updateAutotune(data) {
-        setText('pidGains', data.pidKp.toFixed(2) + ' / ' + data.pidKi.toFixed(2) + ' / ' + data.pidKd.toFixed(2));
+        setText('pidGains', data.pidKp.toFixed(2) + ' / ' + data.pidKi.toFixed(2) + ' / ' + data.pidKd.toFixed(2) + (data.pidCustom ? ' (saved)' : ' (factory)'));
         setPill('autotuneStatus', Components.autotuneStatus(data.autotuneActive));
         document.getElementById('autotuneBtn').disabled = data.autotuneActive;
       }

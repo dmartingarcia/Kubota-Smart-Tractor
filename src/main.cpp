@@ -12,6 +12,7 @@
 #include "charging/EngineDetector.h"
 #include "charging/EngineMode.h"
 #include "charging/VoltageCalibration.h"
+#include "charging/PidSettings.h"
 #include "charging/PwmMirror.h"
 #include "charging/StatusLed.h"
 #include "charging/PidAutotuner.h"
@@ -157,6 +158,25 @@ double pidInput, pidOutput;
 double Setpoint=140.0, Kp=30, Ki=3, Kd=1;
 RealTimePid chargePID(Kp, Ki, Kd, 0, MAX_CHARGE_CURRENT_PWM);
 
+// Kp/Ki/Kd above are the FACTORY gains. Autotune results are saved and loaded on boot; with
+// nothing saved (or after a reset from the dashboard) the factory gains apply.
+LittleFsStore pidStore("/pid.bin");
+PidSettings pidSettings(pidStore, PidGains{Kp, Ki, Kd});
+
+// Calibration aid: while paused the field is held off so the voltage settles and the user can
+// compare the dashboard with a multimeter. Capped, and it simply expires on its own.
+#define ALTERNATOR_PAUSE_MAX_MS 30000
+unsigned long alternatorPauseUntil = 0;
+void pause_alternator(unsigned long ms) {
+  if(ms > ALTERNATOR_PAUSE_MAX_MS) ms = ALTERNATOR_PAUSE_MAX_MS;
+  alternatorPauseUntil = millis() + ms;
+}
+void resume_alternator() { alternatorPauseUntil = millis(); }
+unsigned long alternator_pause_remaining_ms() {
+  unsigned long now = millis();
+  return is_before_deadline(now, alternatorPauseUntil) ? alternatorPauseUntil - now : 0;
+}
+
 // Relay-feedback autotune: swings output +-25% of full scale around mid-scale,
 // noiseBand 0.2V (Setpoint is voltage*10), 6 half-cycles (~3 periods), 3min cap.
 // Its output still goes through decide_pwm_safety_action every cycle, same as normal PID.
@@ -279,6 +299,9 @@ void setup() {
   usageCounters.begin(millis());
   engineModeSettings.begin();
   voltageCalibration.begin();
+  pidSettings.begin();
+  PidGains pidStart = pidSettings.gains();
+  chargePID.setTunings(pidStart.kp, pidStart.ki, pidStart.kd);
   gpsReader.begin();
 
   // Best-effort NTP sync (non-blocking): only resolves once/if STA has internet.
@@ -303,6 +326,13 @@ int lastTargetPWM = 0;
 void manage_alternator() {
   if(overvoltage_alert && millis() - overvoltageAlertMillis >= OVERVOLTAGE_ALERT_HOLD_MS) {
     overvoltage_alert = false; // condition cleared and MQTT has had time to pick it up
+  }
+
+  if(USE_PWM && is_before_deadline(millis(), alternatorPauseUntil)) {
+    alternator.off(); // paused for a calibration measurement: field off, nothing else decides
+    lastTargetPWM = 0;
+    chargePID.hold(0, current_voltage * 10, millis());
+    return;
   }
 
   if(USE_PWM) {
@@ -374,7 +404,8 @@ void manage_alternator() {
 
             if(pidAutotuner.state() == AutotuneState::SUCCEEDED) {
               AutotuneGains g = pidAutotuner.gains();
-              chargePID.setTunings(g.kp, g.ki, g.kd);
+              if(pidSettings.save(PidGains{g.kp, g.ki, g.kd})) chargePID.setTunings(g.kp, g.ki, g.kd);
+              else Serial.println("Autotune gains rejected as implausible, keeping the previous ones");
               Serial.printf("Autotune done: Kp=%.2f Ki=%.2f Kd=%.2f (Ku=%.2f Pu=%.0fms)\n",
                             g.kp, g.ki, g.kd, g.ku, g.pu);
               autotuneActive = false;

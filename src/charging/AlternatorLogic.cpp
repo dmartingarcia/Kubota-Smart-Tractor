@@ -26,3 +26,7 @@ bool gps_indicates_engine_running(bool hasFix, unsigned long fixAgeMs, double sp
   const unsigned long kMaxFixAgeMs = 3000;
   return hasFix && fixAgeMs <= kMaxFixAgeMs && speedKmh >= minSpeedKmh;
 }
+
+bool is_before_deadline(unsigned long currentMillis, unsigned long deadlineMillis) {
+  return static_cast<long>(deadlineMillis - currentMillis) > 0;
+}

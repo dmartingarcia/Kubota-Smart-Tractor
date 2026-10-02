@@ -38,6 +38,11 @@ void handleRestart();
 void handleMqttTest();
 void handleEngineSources();
 void handleVoltageCalibration();
+void handleAlternatorPause();
+void handlePidReset();
+void pause_alternator(unsigned long ms);
+void resume_alternator();
+unsigned long alternator_pause_remaining_ms();
 
 void setupWebServer();
 void handleRoot();

@@ -5,6 +5,7 @@
 #include "../charging/StatusLed.h"
 #include "../charging/VoltageCalibration.h"
 #include "../charging/RealTimePid.h"
+#include "../charging/PidSettings.h"
 #include "../connectivity/MqttPublisher.h"
 #include "../gps/GpsReader.h"
 #include "../gps/GpsJumpFilter.h"
@@ -43,6 +44,7 @@ extern SpeedAverager gpsSpeedAvg;
 extern VoltageCalibration voltageCalibration;
 extern float unscaledVoltage;
 extern RealTimePid chargePID;
+extern PidSettings pidSettings;
 extern LedFault activeFault;
 extern LedFault lastFault;
 extern unsigned long lastFaultMillis;
@@ -81,6 +83,8 @@ void setupWebServer() {
     server.on("/mqtt/test", guarded(handleMqttTest));
     server.on("/engine/sources", guarded(handleEngineSources));
     server.on("/voltage/calibrate", guarded(handleVoltageCalibration));
+    server.on("/alternator/pause", guarded(handleAlternatorPause));
+    server.on("/pid/reset", guarded(handlePidReset));
     server.onNotFound(handleNotFound); // captive portal: unknown host/path -> redirect to the dashboard
     server.collectHeaders("If-None-Match");
     server.begin();
@@ -127,6 +131,8 @@ void handleData() {
   doc["pidKp"] = chargePID.kp();
   doc["pidKi"] = chargePID.ki();
   doc["pidKd"] = chargePID.kd();
+  doc["pidCustom"] = pidSettings.hasCustom();
+  doc["alternatorPausedS"] = (alternator_pause_remaining_ms() + 999) / 1000;
   doc["fault"] = static_cast<int>(activeFault);  // LED blink code, 0 = none
   doc["lastFault"] = static_cast<int>(lastFault);
   doc["lastFaultAgoS"] = (millis() - lastFaultMillis) / 1000;
@@ -224,13 +230,35 @@ void handleVoltageCalibration() {
   if (server.hasArg("reset")) {
     voltageCalibration.reset();
   } else if (server.hasArg("volts")) {
-    if (!voltageCalibration.calibrate(server.arg("volts").toFloat(), unscaledVoltage)) {
+    // "shown" = what the dashboard displayed when the multimeter was read (the voltage moves, so
+    // the device's own reading at request time would be a different number). Falls back to now.
+    float measured = server.arg("volts").toFloat();
+    bool ok = server.hasArg("shown") ? voltageCalibration.calibrateFromShown(measured, server.arg("shown").toFloat())
+                                     : voltageCalibration.calibrate(measured, unscaledVoltage);
+    if (!ok) {
       server.send(400, "application/json",
                   "{\"ok\":false,\"error\":\"Reading rejected: must be 6-20V and within 20% of what the device measures\"}");
       return;
     }
   }
   server.send(200, "application/json", String("{\"ok\":true,\"scale\":") + String(voltageCalibration.scale(), 4) + "}");
+}
+
+// /alternator/pause?seconds=20 holds the field off (max 30s) so the voltage settles while it is
+// compared with a multimeter; /alternator/pause?seconds=0 resumes right away.
+void handleAlternatorPause() {
+  long seconds = server.hasArg("seconds") ? server.arg("seconds").toInt() : 20;
+  if (seconds <= 0) resume_alternator();
+  else pause_alternator(static_cast<unsigned long>(seconds) * 1000UL);
+  server.send(200, "application/json", String("{\"ok\":true,\"pausedS\":") + (alternator_pause_remaining_ms() + 999) / 1000 + "}");
+}
+
+// Back to the factory Kp/Ki/Kd, forgetting the saved (autotuned) ones.
+void handlePidReset() {
+  pidSettings.resetToFactory();
+  PidGains g = pidSettings.gains();
+  chargePID.setTunings(g.kp, g.ki, g.kd);
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleEngineSources() {

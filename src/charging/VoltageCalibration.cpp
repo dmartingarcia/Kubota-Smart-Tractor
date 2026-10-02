@@ -39,3 +39,7 @@ void VoltageCalibration::save() {
   Blob b{kMagic, scale_};
   store_.writeBlob(&b, sizeof(b));
 }
+
+bool VoltageCalibration::calibrateFromShown(float measuredVolts, float shownVolts) {
+  return calibrate(measuredVolts, shownVolts / scale_);
+}
